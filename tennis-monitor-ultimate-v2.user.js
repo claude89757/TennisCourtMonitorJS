@@ -229,6 +229,7 @@
             window.__orderList = [];  // 预订信息
             window.__venueConfig = []; // 场地配置
             window.__venueNameMap = {}; // 场地ID到名称的映射
+            window.__salesName = ''; // 网球场名称 (from salesName in config)
             window.__currentXhrUrl = null;
             
             // Hook JSON.parse to catch decrypted data
@@ -284,6 +285,7 @@
                                 
                                 // Show booking table with venue names from config
                                 const summary = result.data.map(item => ({
+                                    '网球场': window.__salesName || '未知球场',
                                     '场地ID': item.venueId || 'N/A',
                                     '场地名称': window.__venueNameMap[item.venueId] || item.venueName || '未知场地',
                                     '状态': item.dealId ? '🔒已锁定' : (item.orderId ? '✅已确认' : '⭕可用'),
@@ -351,6 +353,7 @@
                                         const timeRanges = hoursToRanges(available);
                                         
                                         availabilityTable.push({
+                                            '网球场': window.__salesName || '未知球场',
                                             '场地ID': venueId,
                                             '场地名称': venue.name,
                                             '可用时段': timeRanges.length > 0 ? 
@@ -401,6 +404,12 @@
                                 console.log('完整响应:', result);
                                 console.log('配置详情:', result.data);
                                 
+                                // Extract salesName (tennis court name)
+                                if (result.data && result.data.salesName) {
+                                    window.__salesName = result.data.salesName;
+                                    console.log('网球场名称:', window.__salesName);
+                                }
+                                
                                 // Extract venue name mapping from config
                                 if (result.data && result.data.venueResponses) {
                                     result.data.venueResponses.forEach(venue => {
@@ -419,6 +428,7 @@
                                     // Display venue list if available
                                     if (result.data.venueResponses) {
                                         const venueTable = result.data.venueResponses.map(v => ({
+                                            '网球场': window.__salesName || result.data.salesName || '未知球场',
                                             '场地ID': v.venueId,
                                             '场地名称': v.venueName,
                                             '状态': v.platformOpen === 1 ? '✅开放' : '❌关闭',
@@ -716,5 +726,244 @@
         countdownDisplay.title = '左键点击: 立即刷新 | 右键点击: 暂停/继续';
         
     }, 2000); // Start timer after 2 seconds to ensure page is loaded
+    
+    // ==================== PHASE 5: AUTO-CLICK DATETIME TABS ====================
+    
+    // Auto-click all datetime tabs after page load
+    setTimeout(() => {
+        console.log('%c🔍 [AUTO-CLICK] Looking for datetime tabs...', 'background: blue; color: white; font-weight: bold');
+        
+        const clickDateTimeTabs = async () => {
+            console.log('%c🔍 [AUTO-CLICK] Searching for weekday tabs...', 'background: blue; color: white');
+            
+            // Simple and precise: target div.week or div.dt elements
+            const weekdayElements = document.querySelectorAll('div.week, div.dt, .week, .dt');
+            const weekdayTabs = [];
+            const processedTexts = new Set();
+            let currentActiveTab = null;
+            
+            // Also check for weekday patterns
+            const weekdayPatterns = [
+                /星期[一二三四五六日]/,
+                /周[一二三四五六日]/,
+                /\d{1,2}月\d{1,2}日/,
+                /今天|明天|后天/
+            ];
+            
+            // First pass: find the currently visible/active tab by checking computed styles
+            let activeTabText = null;
+            weekdayElements.forEach(el => {
+                const text = (el.textContent || '').trim();
+                const hasWeekday = weekdayPatterns.some(pattern => pattern.test(text));
+                
+                if (hasWeekday) {
+                    // Check various ways to detect if this is the current tab
+                    const computedStyle = window.getComputedStyle(el);
+                    const parentStyle = el.parentElement ? window.getComputedStyle(el.parentElement) : null;
+                    
+                    // Check for distinctive active styles
+                    const possiblyActive = 
+                        // Check element's own styles
+                        computedStyle.backgroundColor !== 'rgba(0, 0, 0, 0)' && 
+                        computedStyle.backgroundColor !== 'transparent' &&
+                        computedStyle.backgroundColor !== '' ||
+                        computedStyle.color === 'rgb(255, 255, 255)' || // Often active tabs have white text
+                        computedStyle.fontWeight === 'bold' ||
+                        computedStyle.fontWeight === '700' ||
+                        // Check parent's styles
+                        (parentStyle && (
+                            parentStyle.backgroundColor !== 'rgba(0, 0, 0, 0)' && 
+                            parentStyle.backgroundColor !== 'transparent'
+                        )) ||
+                        // Check classes
+                        el.classList.contains('active') ||
+                        el.classList.contains('selected') ||
+                        el.classList.contains('on') ||
+                        (el.parentElement && (
+                            el.parentElement.classList.contains('active') ||
+                            el.parentElement.classList.contains('selected')
+                        ));
+                    
+                    if (possiblyActive && !activeTabText) {
+                        activeTabText = text;
+                        currentActiveTab = el;
+                        console.log('%c🎯 Detected current active tab: ' + text, 'background: red; color: yellow; font-weight: bold');
+                        console.log('  Background:', computedStyle.backgroundColor);
+                        console.log('  Color:', computedStyle.color);
+                        console.log('  Classes:', el.className);
+                    }
+                }
+            });
+            
+            // If no active tab detected by styles, assume the first visible one is active
+            if (!activeTabText) {
+                console.log('%c⚠️ Could not detect active tab by styles, will click all visible tabs', 'color: orange');
+            }
+            
+            // Second pass: collect clickable tabs, skipping the active one
+            weekdayElements.forEach(el => {
+                const text = (el.textContent || '').trim();
+                
+                // Skip if this is the active tab we detected
+                if (activeTabText && text === activeTabText) {
+                    console.log('%c⏭️ Skipping current active tab: ' + text, 'background: orange; color: white; font-weight: bold');
+                    return;
+                }
+                
+                // Check if contains weekday text and not already processed
+                const hasWeekday = weekdayPatterns.some(pattern => pattern.test(text));
+                
+                if (hasWeekday && !processedTexts.has(text)) {
+                    const rect = el.getBoundingClientRect();
+                    
+                    // Only add visible elements
+                    if (rect.width > 0 && rect.height > 0) {
+                        weekdayTabs.push({
+                            element: el,
+                            text: text,
+                            rect: rect
+                        });
+                        processedTexts.add(text);
+                        console.log('%c✓ Will click weekday element: ' + text, 'color: cyan');
+                    }
+                }
+            });
+            
+            // Sort by position (left to right)
+            weekdayTabs.sort((a, b) => {
+                if (Math.abs(a.rect.top - b.rect.top) > 10) {
+                    return a.rect.top - b.rect.top;
+                }
+                return a.rect.left - b.rect.left;
+            });
+            
+            console.log('%c📅 [AUTO-CLICK] Found ' + weekdayTabs.length + ' weekday tabs', 'background: green; color: white; font-weight: bold');
+            
+            if (weekdayTabs.length > 0) {
+                let clickCount = 0;
+                
+                // Create status display
+                const statusDisplay = document.createElement('div');
+                statusDisplay.style.cssText = `
+                    position: fixed;
+                    top: 50px;
+                    right: 20px;
+                    background: rgba(0, 100, 200, 0.9);
+                    color: white;
+                    padding: 10px;
+                    border-radius: 5px;
+                    font-family: monospace;
+                    font-size: 12px;
+                    z-index: 999996;
+                    max-width: 300px;
+                `;
+                
+                if (document.body) {
+                    document.body.appendChild(statusDisplay);
+                }
+                
+                // Show all found tabs
+                console.log('%c📋 Will click the following tabs in order:', 'background: blue; color: white');
+                weekdayTabs.forEach((tab, index) => {
+                    console.log('  ' + (index + 1) + '. ' + tab.text);
+                });
+                
+                // Show which tab was skipped
+                if (activeTabText) {
+                    console.log('%c⏭️ Active tab detected and skipped: ' + activeTabText, 'background: orange; color: white; font-weight: bold');
+                }
+                
+                // Click each tab with delay
+                for (let i = 0; i < weekdayTabs.length; i++) {
+                    const tabInfo = weekdayTabs[i];
+                    const tab = tabInfo.element;
+                    const tabText = tabInfo.text;
+                    
+                    // Update status
+                    if (statusDisplay) {
+                        statusDisplay.innerHTML = `
+                            🤖 自动点击日期标签...<br>
+                            进度: ${i + 1}/${weekdayTabs.length}<br>
+                            当前: ${tabText}<br>
+                            <small>等待5秒加载数据...</small>
+                        `;
+                    }
+                    
+                    try {
+                        // Highlight the tab being clicked
+                        const originalBorder = tab.style.border;
+                        const originalBackground = tab.style.background;
+                        const originalBoxShadow = tab.style.boxShadow;
+                        
+                        tab.style.border = '3px solid #ff0000';
+                        tab.style.background = 'rgba(255, 0, 0, 0.3)';
+                        tab.style.boxShadow = '0 0 10px rgba(255, 0, 0, 0.8)';
+                        
+                        // Scroll into view if needed
+                        tab.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                        
+                        // Small delay for scroll
+                        await new Promise(resolve => setTimeout(resolve, 500));
+                        
+                        // Click the tab
+                        tab.click();
+                        clickCount++;
+                        
+                        console.log('%c✅ [AUTO-CLICK] Clicked tab #' + (i + 1) + ': ' + tabText, 'background: green; color: white');
+                        
+                        // Wait for data to load (5 seconds between clicks)
+                        await new Promise(resolve => setTimeout(resolve, 5000));
+                        
+                        // Restore original style
+                        tab.style.border = originalBorder;
+                        tab.style.background = originalBackground;
+                        tab.style.boxShadow = originalBoxShadow;
+                        
+                    } catch(e) {
+                        console.log('%c❌ [AUTO-CLICK] Failed to click tab: ' + tabText, 'color: red');
+                        console.error(e);
+                    }
+                }
+                
+                // Show completion message
+                if (statusDisplay) {
+                    statusDisplay.style.background = 'rgba(0, 200, 0, 0.9)';
+                    statusDisplay.innerHTML = `
+                        ✅ 自动点击完成!<br>
+                        成功点击 ${clickCount}/${weekdayTabs.length} 个标签<br>
+                        所有场地数据已捕获
+                    `;
+                    
+                    // Remove status after 5 seconds
+                    setTimeout(() => {
+                        statusDisplay.remove();
+                    }, 5000);
+                }
+                
+                console.log('%c🎉 [AUTO-CLICK] Completed! Clicked ' + clickCount + ' tabs', 'background: green; color: white; font-size: 14px; font-weight: bold');
+                
+                // Trigger data check after all clicks
+                setTimeout(() => {
+                    if (unsafeWindow.check) {
+                        console.log('%c📊 [AUTO-CLICK] Showing captured data summary', 'background: purple; color: white');
+                        unsafeWindow.check();
+                    }
+                }, 2000);
+                
+            } else {
+                console.log('%c⚠️ [AUTO-CLICK] No weekday tabs found on this page', 'background: orange; color: white');
+                console.log('Looking for elements with patterns: 周一-周日, 星期一-星期日, 今天, 明天, 后天, or date format like 12月25日');
+            }
+        };
+        
+        // Execute auto-click
+        clickDateTimeTabs();
+        
+        // Also set up to run after each refresh
+        window.addEventListener('load', () => {
+            setTimeout(clickDateTimeTabs, 3000);
+        });
+        
+    }, 5000); // Wait 5 seconds after page load to ensure everything is rendered
     
 })();
