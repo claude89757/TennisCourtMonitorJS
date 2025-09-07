@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Tennis Court Monitor Ultimate V2
 // @namespace    http://tampermonkey.net/
-// @version      6.1
-// @description  Ultimate anti-debugger bypass with aggressive injection
+// @version      7.0
+// @description  Ultimate anti-debugger bypass with aggressive injection and Airflow caching
 // @author       Claude
 // @match        https://wxsports.ydmap.cn/booking/schedule/*
 // @match        https://wxsports.ydmap.cn/*
@@ -12,6 +12,9 @@
 // @grant        unsafeWindow
 // @grant        GM_addStyle
 // @grant        GM_log
+// @grant        GM_xmlhttpRequest
+// @grant        GM_setValue
+// @grant        GM_getValue
 // @run-at       document-start
 // ==/UserScript==
 
@@ -283,6 +286,18 @@
                                 console.log('完整响应:', result);
                                 console.log('预订数量:', result.data.length);
                                 
+                                // Try to extract court name from booking data if not already set
+                                if (!window.__salesName && result.data.length > 0) {
+                                    const firstItem = result.data[0];
+                                    if (firstItem.placeName) {
+                                        window.__salesName = firstItem.placeName;
+                                        console.log('网球场名称 (from booking placeName):', window.__salesName);
+                                    } else if (firstItem.sportPlaceName) {
+                                        window.__salesName = firstItem.sportPlaceName;
+                                        console.log('网球场名称 (from booking sportPlaceName):', window.__salesName);
+                                    }
+                                }
+                                
                                 // Show booking table with venue names from config
                                 const summary = result.data.map(item => ({
                                     '网球场': window.__salesName || '未知球场',
@@ -404,10 +419,30 @@
                                 console.log('完整响应:', result);
                                 console.log('配置详情:', result.data);
                                 
-                                // Extract salesName (tennis court name)
-                                if (result.data && result.data.salesName) {
-                                    window.__salesName = result.data.salesName;
-                                    console.log('网球场名称:', window.__salesName);
+                                // Extract salesName (tennis court name) from multiple possible fields
+                                if (result.data) {
+                                    // Try multiple possible field names for the court name
+                                    const possibleFields = ['salesName', 'venueName', 'sportName', 'placeName', 'name', 'title', 'sportPlaceName'];
+                                    
+                                    for (const field of possibleFields) {
+                                        if (result.data[field]) {
+                                            window.__salesName = result.data[field];
+                                            console.log('网球场名称 (from ' + field + '):', window.__salesName);
+                                            break;
+                                        }
+                                    }
+                                    
+                                    // If still not found, check nested structures
+                                    if (!window.__salesName && result.data.sportPlaceResponse) {
+                                        const place = result.data.sportPlaceResponse;
+                                        if (place.placeName) {
+                                            window.__salesName = place.placeName;
+                                            console.log('网球场名称 (from sportPlaceResponse.placeName):', window.__salesName);
+                                        } else if (place.name) {
+                                            window.__salesName = place.name;
+                                            console.log('网球场名称 (from sportPlaceResponse.name):', window.__salesName);
+                                        }
+                                    }
                                 }
                                 
                                 // Extract venue name mapping from config
@@ -502,6 +537,7 @@
             // Add commands
             window.check = function() {
                 console.log('%c===== 数据汇总 =====', 'background: black; color: yellow; font-weight: bold');
+                console.log('网球场名称 (salesName):', window.__salesName || '未捕获');
                 console.log('预订信息 (getVenueOrderList):', window.__orderList.length + ' 次捕获');
                 if (window.__orderList.length > 0) {
                     console.log('最新预订数据:', window.__orderList[window.__orderList.length - 1]);
@@ -510,6 +546,7 @@
                 if (window.__venueConfig.length > 0) {
                     console.log('最新配置数据:', window.__venueConfig[window.__venueConfig.length - 1]);
                 }
+                console.log('场地名称映射:', window.__venueNameMap);
             };
             
             console.log('%c[MONITOR] 监控已启动! 输入 check() 查看数据', 'background: green; color: white; font-weight: bold');
@@ -570,6 +607,33 @@
             }
         };
         
+        // Add Airflow sync button
+        const airflowButton = document.createElement('div');
+        airflowButton.innerHTML = '☁️';
+        airflowButton.title = '同步数据到 Airflow';
+        airflowButton.style.cssText = `
+            position: fixed;
+            bottom: 90px;
+            right: 20px;
+            width: 60px;
+            height: 60px;
+            background: linear-gradient(135deg, #2196F3, #1976D2);
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 30px;
+            cursor: pointer;
+            z-index: 999999;
+            box-shadow: 0 4px 20px rgba(33, 150, 243, 0.5);
+            animation: pulse 2s infinite;
+        `;
+        
+        airflowButton.onclick = async () => {
+            console.log('%c☁️ [MANUAL] Syncing to Airflow...', 'background: blue; color: white; font-weight: bold');
+            await sendToAirflow();
+        };
+        
         // Add animation
         GM_addStyle(`
             @keyframes pulse {
@@ -581,7 +645,8 @@
         
         if (document.body) {
             document.body.appendChild(button);
-            console.log('[TM] Visual button added');
+            document.body.appendChild(airflowButton);
+            console.log('[TM] Visual buttons added');
         }
         
         // Add status banner
@@ -626,7 +691,7 @@
         countdownDisplay.id = 'refresh-countdown';
         countdownDisplay.style.cssText = `
             position: fixed;
-            bottom: 90px;
+            bottom: 160px;
             right: 20px;
             background: rgba(0, 0, 0, 0.8);
             color: white;
@@ -727,7 +792,494 @@
         
     }, 2000); // Start timer after 2 seconds to ensure page is loaded
     
-    // ==================== PHASE 5: AUTO-CLICK DATETIME TABS ====================
+    // ==================== PHASE 5: AIRFLOW API INTEGRATION ====================
+    
+    // Airflow API configuration
+    const AIRFLOW_BASE_URL = 'http://zacks.com.cn:8080/airflow/api/v1';
+    
+    // Check and prompt for credentials
+    const checkCredentials = () => {
+        return new Promise((resolve) => {
+            let username = GM_getValue('airflow_username', null);
+            let password = GM_getValue('airflow_password', null);
+            
+            if (!username || !password) {
+                // Create modal for credentials input
+                const modal = document.createElement('div');
+                modal.id = 'auth-modal';
+                modal.style.cssText = `
+                    position: fixed;
+                    top: 0;
+                    left: 0;
+                    width: 100%;
+                    height: 100%;
+                    background: rgba(0, 0, 0, 0.8);
+                    display: flex;
+                    justify-content: center;
+                    align-items: center;
+                    z-index: 1000000;
+                `;
+                
+                const modalContent = document.createElement('div');
+                modalContent.style.cssText = `
+                    background: white;
+                    padding: 30px;
+                    border-radius: 10px;
+                    box-shadow: 0 5px 30px rgba(0, 0, 0, 0.3);
+                    max-width: 400px;
+                    width: 90%;
+                `;
+                
+                modalContent.innerHTML = `
+                    <h2 style="margin-top: 0; color: #333;">🔐 Airflow API 认证</h2>
+                    <p style="color: #666;">首次使用需要输入 Airflow API 账号密码</p>
+                    <div style="margin-bottom: 15px;">
+                        <label style="display: block; margin-bottom: 5px; color: #555;">用户名:</label>
+                        <input type="text" id="airflow-username" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px; box-sizing: border-box;">
+                    </div>
+                    <div style="margin-bottom: 20px;">
+                        <label style="display: block; margin-bottom: 5px; color: #555;">密码:</label>
+                        <input type="password" id="airflow-password" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px; box-sizing: border-box;">
+                    </div>
+                    <div style="display: flex; gap: 10px;">
+                        <button id="auth-submit" style="flex: 1; padding: 10px; background: #4CAF50; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 16px;">保存</button>
+                        <button id="auth-cancel" style="flex: 1; padding: 10px; background: #f44336; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 16px;">取消</button>
+                    </div>
+                `;
+                
+                modal.appendChild(modalContent);
+                document.body.appendChild(modal);
+                
+                document.getElementById('auth-submit').onclick = () => {
+                    const inputUsername = document.getElementById('airflow-username').value;
+                    const inputPassword = document.getElementById('airflow-password').value;
+                    
+                    if (inputUsername && inputPassword) {
+                        GM_setValue('airflow_username', inputUsername);
+                        GM_setValue('airflow_password', inputPassword);
+                        modal.remove();
+                        console.log('%c✅ [AIRFLOW] Credentials saved', 'background: green; color: white');
+                        resolve({ username: inputUsername, password: inputPassword });
+                    } else {
+                        alert('请输入用户名和密码');
+                    }
+                };
+                
+                document.getElementById('auth-cancel').onclick = () => {
+                    modal.remove();
+                    console.log('%c❌ [AIRFLOW] Authentication cancelled', 'background: red; color: white');
+                    resolve(null);
+                };
+                
+                // Auto-focus username field
+                setTimeout(() => {
+                    document.getElementById('airflow-username').focus();
+                }, 100);
+                
+            } else {
+                console.log('%c✅ [AIRFLOW] Using cached credentials', 'background: green; color: white');
+                resolve({ username, password });
+            }
+        });
+    };
+    
+    // Send data to Airflow
+    const sendToAirflow = async () => {
+        // First check if we have the necessary data
+        if (!unsafeWindow.__salesName || unsafeWindow.__salesName === '') {
+            console.log('%c⚠️ [AIRFLOW] 网球场名称未获取，请等待数据加载完成', 'background: orange; color: white; font-weight: bold');
+            
+            // Show warning notification
+            const notification = document.createElement('div');
+            notification.style.cssText = `
+                position: fixed;
+                top: 100px;
+                right: 20px;
+                background: linear-gradient(135deg, #ff9800, #f57c00);
+                color: white;
+                padding: 15px 20px;
+                border-radius: 8px;
+                box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+                z-index: 999999;
+                font-weight: bold;
+                animation: slideIn 0.5s ease;
+            `;
+            notification.innerHTML = '⚠️ 请先等待场地信息加载完成';
+            document.body.appendChild(notification);
+            setTimeout(() => notification.remove(), 5000);
+            return;
+        }
+        
+        // Check if we have actual booking data
+        if (!unsafeWindow.__orderList || unsafeWindow.__orderList.length === 0) {
+            console.log('%c⚠️ [AIRFLOW] 没有预订数据，请先点击日期标签加载数据', 'background: orange; color: white; font-weight: bold');
+            
+            // Show warning notification
+            const notification = document.createElement('div');
+            notification.style.cssText = `
+                position: fixed;
+                top: 100px;
+                right: 20px;
+                background: linear-gradient(135deg, #ff9800, #f57c00);
+                color: white;
+                padding: 15px 20px;
+                border-radius: 8px;
+                box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+                z-index: 999999;
+                font-weight: bold;
+                animation: slideIn 0.5s ease;
+            `;
+            notification.innerHTML = '⚠️ 没有预订数据，请先查询场地信息';
+            document.body.appendChild(notification);
+            setTimeout(() => notification.remove(), 5000);
+            return;
+        }
+        
+        const credentials = await checkCredentials();
+        if (!credentials) {
+            console.log('%c⚠️ [AIRFLOW] No credentials provided, skipping API call', 'background: orange; color: white');
+            return;
+        }
+        
+        // Get tennis court name and create variable key
+        const courtName = unsafeWindow.__salesName;
+        // Clean the court name to be used as a variable key (remove special characters, replace spaces with underscores)
+        const variableKey = 'tennis_court_' + courtName.replace(/[^a-zA-Z0-9\u4e00-\u9fa5]/g, '_').toLowerCase();
+        
+        const authHeader = 'Basic ' + btoa(credentials.username + ':' + credentials.password);
+        const timestamp = new Date().toISOString();
+        const dateStr = new Date().toLocaleDateString('zh-CN');
+        
+        // Process booking data to create formatted tables
+        const bookingTable = [];
+        const availabilityTable = [];
+        
+        // Process all booking data
+        if (unsafeWindow.__orderList && unsafeWindow.__orderList.length > 0) {
+            // Get the latest booking data
+            const latestOrder = unsafeWindow.__orderList[unsafeWindow.__orderList.length - 1];
+            
+            if (latestOrder.data && Array.isArray(latestOrder.data)) {
+                // Create booking summary table
+                latestOrder.data.forEach(item => {
+                    bookingTable.push({
+                        courtName: courtName,
+                        venueId: item.venueId || null,
+                        venueName: unsafeWindow.__venueNameMap[item.venueId] || item.venueName || '未知场地',
+                        status: item.dealId ? 'locked' : (item.orderId ? 'confirmed' : 'available'),
+                        statusText: item.dealId ? '已锁定' : (item.orderId ? '已确认' : '可用'),
+                        startTime: item.startTime || null,
+                        endTime: item.endTime || null,
+                        timeSlot: item.startTime ? 
+                            new Date(item.startTime).toLocaleTimeString('zh-CN', {hour: '2-digit', minute:'2-digit'}) + 
+                            '-' + 
+                            new Date(item.endTime).toLocaleTimeString('zh-CN', {hour: '2-digit', minute:'2-digit'}) 
+                            : null,
+                        price: item.price || null,
+                        date: item.startTime ? new Date(item.startTime).toLocaleDateString('zh-CN') : dateStr
+                    });
+                });
+                
+                // Calculate availability for each venue
+                const hours = Array.from({length: 16}, (_, i) => i + 7); // 7:00 to 22:00
+                const venueAvailability = {};
+                
+                // Group bookings by venue ID
+                latestOrder.data.forEach(b => {
+                    if (b.venueId && b.startTime && b.endTime) {
+                        if (!venueAvailability[b.venueId]) {
+                            venueAvailability[b.venueId] = {
+                                booked: new Set(),
+                                name: unsafeWindow.__venueNameMap[b.venueId] || b.venueName || b.venueId
+                            };
+                        }
+                        const start = new Date(b.startTime).getHours();
+                        const end = new Date(b.endTime).getHours();
+                        for(let h = start; h < end; h++) {
+                            venueAvailability[b.venueId].booked.add(h);
+                        }
+                    }
+                });
+                
+                // Helper function to convert hours array to time ranges
+                const hoursToRanges = (hours) => {
+                    if (hours.length === 0) return [];
+                    
+                    const ranges = [];
+                    let start = hours[0];
+                    let end = hours[0];
+                    
+                    for (let i = 1; i < hours.length; i++) {
+                        if (hours[i] === end + 1) {
+                            end = hours[i];
+                        } else {
+                            ranges.push({
+                                start: start,
+                                end: end + 1,
+                                text: start + ':00-' + (end + 1) + ':00'
+                            });
+                            start = hours[i];
+                            end = hours[i];
+                        }
+                    }
+                    ranges.push({
+                        start: start,
+                        end: end + 1,
+                        text: start + ':00-' + (end + 1) + ':00'
+                    });
+                    return ranges;
+                };
+                
+                // Build availability table
+                for (const venueId in venueAvailability) {
+                    const venue = venueAvailability[venueId];
+                    const available = hours.filter(h => !venue.booked.has(h));
+                    const timeRanges = hoursToRanges(available);
+                    
+                    availabilityTable.push({
+                        courtName: courtName,
+                        venueId: venueId,
+                        venueName: venue.name,
+                        availableSlots: timeRanges.map(r => r.text),
+                        availableHours: available,
+                        availableHourCount: available.length,
+                        hasAvailability: available.length > 0,
+                        date: dateStr,
+                        bookedHours: Array.from(venue.booked).sort((a, b) => a - b),
+                        bookedHourCount: venue.booked.size
+                    });
+                }
+            }
+        }
+        
+        // Get venue configuration info
+        let venueConfigInfo = null;
+        if (unsafeWindow.__venueConfig && unsafeWindow.__venueConfig.length > 0) {
+            const latestConfig = unsafeWindow.__venueConfig[unsafeWindow.__venueConfig.length - 1];
+            if (latestConfig.data) {
+                venueConfigInfo = {
+                    salesName: latestConfig.data.salesName || courtName,
+                    venues: []
+                };
+                
+                if (latestConfig.data.venueResponses) {
+                    venueConfigInfo.venues = latestConfig.data.venueResponses.map(v => ({
+                        venueId: v.venueId,
+                        venueName: v.venueName,
+                        isOpen: v.platformOpen === 1,
+                        closeReason: v.platformCloseAlert || null
+                    }));
+                }
+            }
+        }
+        
+        // Format the data for Airflow
+        const formattedData = {
+            timestamp: timestamp,
+            courtName: courtName,
+            date: dateStr,
+            
+            // Formatted tables for easy processing
+            bookingTable: bookingTable,
+            availabilityTable: availabilityTable,
+            
+            // Venue configuration
+            venueConfig: venueConfigInfo,
+            
+            // Summary statistics
+            summary: {
+                totalVenues: Object.keys(unsafeWindow.__venueNameMap || {}).length,
+                totalBookings: bookingTable.length,
+                totalAvailableSlots: availabilityTable.reduce((sum, v) => sum + v.availableHourCount, 0),
+                totalBookedSlots: availabilityTable.reduce((sum, v) => sum + v.bookedHourCount, 0),
+                venuesWithAvailability: availabilityTable.filter(v => v.hasAvailability).length,
+                lastUpdate: timestamp
+            },
+            
+            // Raw data for reference
+            rawData: {
+                venueNameMap: unsafeWindow.__venueNameMap || {},
+                orderListCount: unsafeWindow.__orderList ? unsafeWindow.__orderList.length : 0,
+                configCount: unsafeWindow.__venueConfig ? unsafeWindow.__venueConfig.length : 0
+            }
+        };
+        
+        const jsonString = JSON.stringify(formattedData);
+        const description = `${courtName} booking data updated at ${timestamp}`;
+        
+        // Log summary of data being sent
+        console.log('%c📊 [AIRFLOW] 准备发送数据到 Airflow', 'background: purple; color: white; font-weight: bold');
+        console.log('网球场名称:', courtName);
+        console.log('变量名称:', variableKey);
+        console.log('日期:', dateStr);
+        
+        // Show booking table summary
+        if (bookingTable.length > 0) {
+            console.log('%c📋 预订信息表 (bookingTable):', 'background: blue; color: white');
+            console.table(bookingTable.map(b => ({
+                '场地': b.venueName,
+                '状态': b.statusText,
+                '时段': b.timeSlot,
+                '价格': b.price
+            })));
+        }
+        
+        // Show availability table summary
+        if (availabilityTable.length > 0) {
+            console.log('%c⏰ 可用时段表 (availabilityTable):', 'background: green; color: white');
+            console.table(availabilityTable.map(a => ({
+                '场地': a.venueName,
+                '可用时段': a.availableSlots.join(', ') || '无',
+                '可用小时数': a.availableHourCount,
+                '已预订小时数': a.bookedHourCount
+            })));
+        }
+        
+        // Show summary statistics
+        console.log('%c📈 汇总统计 (summary):', 'background: teal; color: white');
+        console.log('  - 场地总数:', formattedData.summary.totalVenues);
+        console.log('  - 预订记录数:', formattedData.summary.totalBookings);
+        console.log('  - 总可用时段:', formattedData.summary.totalAvailableSlots, '小时');
+        console.log('  - 总已订时段:', formattedData.summary.totalBookedSlots, '小时');
+        console.log('  - 有可用时段的场地数:', formattedData.summary.venuesWithAvailability);
+        
+        // First try to update existing variable
+        console.log('%c🔄 [AIRFLOW] Attempting to update variable: ' + variableKey, 'background: blue; color: white');
+        
+        GM_xmlhttpRequest({
+            method: 'PATCH',
+            url: `${AIRFLOW_BASE_URL}/variables/${variableKey}`,
+            headers: {
+                'Authorization': authHeader,
+                'Content-Type': 'application/json',
+                'Accept': 'application/json'
+            },
+            data: JSON.stringify({
+                key: variableKey,
+                value: jsonString,
+                description: description
+            }),
+            onload: function(response) {
+                if (response.status === 200 || response.status === 204) {
+                    console.log('%c✅ [AIRFLOW] Variable updated successfully', 'background: green; color: white; font-size: 14px; font-weight: bold');
+                    console.log('Response:', response.responseText);
+                    
+                    // Show success notification
+                    const notification = document.createElement('div');
+                    notification.style.cssText = `
+                        position: fixed;
+                        top: 100px;
+                        right: 20px;
+                        background: linear-gradient(135deg, #4CAF50, #45a049);
+                        color: white;
+                        padding: 15px 20px;
+                        border-radius: 8px;
+                        box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+                        z-index: 999999;
+                        font-weight: bold;
+                        animation: slideIn 0.5s ease;
+                    `;
+                    notification.innerHTML = `✅ 数据已成功同步到 Airflow<br><small>变量: ${variableKey}</small>`;
+                    document.body.appendChild(notification);
+                    setTimeout(() => notification.remove(), 5000);
+                    
+                } else if (response.status === 404) {
+                    // Variable doesn't exist, create it
+                    console.log('%c📝 [AIRFLOW] Variable not found, creating new: ' + variableKey, 'background: orange; color: white');
+                    
+                    GM_xmlhttpRequest({
+                        method: 'POST',
+                        url: `${AIRFLOW_BASE_URL}/variables`,
+                        headers: {
+                            'Authorization': authHeader,
+                            'Content-Type': 'application/json',
+                            'Accept': 'application/json'
+                        },
+                        data: JSON.stringify({
+                            key: variableKey,
+                            value: jsonString,
+                            description: description
+                        }),
+                        onload: function(createResponse) {
+                            if (createResponse.status === 200 || createResponse.status === 201) {
+                                console.log('%c✅ [AIRFLOW] Variable created successfully', 'background: green; color: white; font-size: 14px; font-weight: bold');
+                                console.log('Response:', createResponse.responseText);
+                                
+                                // Show success notification
+                                const notification = document.createElement('div');
+                                notification.style.cssText = `
+                                    position: fixed;
+                                    top: 100px;
+                                    right: 20px;
+                                    background: linear-gradient(135deg, #4CAF50, #45a049);
+                                    color: white;
+                                    padding: 15px 20px;
+                                    border-radius: 8px;
+                                    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+                                    z-index: 999999;
+                                    font-weight: bold;
+                                    animation: slideIn 0.5s ease;
+                                `;
+                                notification.innerHTML = `✅ 数据已成功创建并同步到 Airflow<br><small>变量: ${variableKey}</small>`;
+                                document.body.appendChild(notification);
+                                setTimeout(() => notification.remove(), 5000);
+                                
+                            } else {
+                                console.log('%c❌ [AIRFLOW] Failed to create variable', 'background: red; color: white');
+                                console.log('Status:', createResponse.status);
+                                console.log('Response:', createResponse.responseText);
+                                
+                                // Check if it's authentication error
+                                if (createResponse.status === 401 || createResponse.status === 403) {
+                                    console.log('%c🔒 [AIRFLOW] Authentication failed, clearing saved credentials', 'background: red; color: white');
+                                    GM_setValue('airflow_username', null);
+                                    GM_setValue('airflow_password', null);
+                                    alert('Airflow API 认证失败，请重新输入账号密码');
+                                }
+                            }
+                        },
+                        onerror: function(error) {
+                            console.log('%c❌ [AIRFLOW] Network error creating variable', 'background: red; color: white');
+                            console.error(error);
+                        }
+                    });
+                    
+                } else {
+                    console.log('%c❌ [AIRFLOW] Failed to update variable', 'background: red; color: white');
+                    console.log('Status:', response.status);
+                    console.log('Response:', response.responseText);
+                    
+                    // Check if it's authentication error
+                    if (response.status === 401 || response.status === 403) {
+                        console.log('%c🔒 [AIRFLOW] Authentication failed, clearing saved credentials', 'background: red; color: white');
+                        GM_setValue('airflow_username', null);
+                        GM_setValue('airflow_password', null);
+                        alert('Airflow API 认证失败，请重新输入账号密码');
+                    }
+                }
+            },
+            onerror: function(error) {
+                console.log('%c❌ [AIRFLOW] Network error updating variable', 'background: red; color: white');
+                console.error(error);
+            }
+        });
+    };
+    
+    // Add CSS for animations
+    GM_addStyle(`
+        @keyframes slideIn {
+            from {
+                transform: translateX(100%);
+                opacity: 0;
+            }
+            to {
+                transform: translateX(0);
+                opacity: 1;
+            }
+        }
+    `);
+    
+    // ==================== PHASE 6: AUTO-CLICK DATETIME TABS ====================
     
     // Auto-click all datetime tabs after page load
     setTimeout(() => {
@@ -740,7 +1292,6 @@
             const weekdayElements = document.querySelectorAll('div.week, div.dt, .week, .dt');
             const weekdayTabs = [];
             const processedTexts = new Set();
-            let currentActiveTab = null;
             
             // Also check for weekday patterns
             const weekdayPatterns = [
@@ -786,7 +1337,6 @@
                     
                     if (possiblyActive && !activeTabText) {
                         activeTabText = text;
-                        currentActiveTab = el;
                         console.log('%c🎯 Detected current active tab: ' + text, 'background: red; color: yellow; font-weight: bold');
                         console.log('  Background:', computedStyle.backgroundColor);
                         console.log('  Color:', computedStyle.color);
@@ -947,6 +1497,34 @@
                     if (unsafeWindow.check) {
                         console.log('%c📊 [AUTO-CLICK] Showing captured data summary', 'background: purple; color: white');
                         unsafeWindow.check();
+                    }
+                    
+                    // Send captured data to Airflow only if we have data
+                    console.log('%c🔍 [AUTO-CLICK] 检查数据完整性...', 'background: blue; color: white');
+                    console.log('  - unsafeWindow.__salesName:', unsafeWindow.__salesName);
+                    console.log('  - unsafeWindow.__orderList:', unsafeWindow.__orderList);
+                    console.log('  - unsafeWindow.__orderList.length:', unsafeWindow.__orderList ? unsafeWindow.__orderList.length : 0);
+                    console.log('  - unsafeWindow.__venueConfig.length:', unsafeWindow.__venueConfig ? unsafeWindow.__venueConfig.length : 0);
+                    
+                    if (unsafeWindow.__salesName && unsafeWindow.__orderList && unsafeWindow.__orderList.length > 0) {
+                        console.log('%c📤 [AUTO-CLICK] Sending data to Airflow...', 'background: purple; color: white; font-weight: bold');
+                        sendToAirflow();
+                    } else {
+                        console.log('%c⚠️ [AUTO-CLICK] 数据不完整，跳过 Airflow 同步', 'background: orange; color: white');
+                        console.log('  - 网球场名称:', unsafeWindow.__salesName || '未获取');
+                        console.log('  - 预订数据数量:', unsafeWindow.__orderList ? unsafeWindow.__orderList.length : 0);
+                        
+                        // Additional debug: check what data we actually have
+                        if (unsafeWindow.__venueConfig && unsafeWindow.__venueConfig.length > 0) {
+                            const lastConfig = unsafeWindow.__venueConfig[unsafeWindow.__venueConfig.length - 1];
+                            console.log('  - 最新配置数据字段:', Object.keys(lastConfig.data || {}));
+                        }
+                        if (unsafeWindow.__orderList && unsafeWindow.__orderList.length > 0) {
+                            const lastOrder = unsafeWindow.__orderList[unsafeWindow.__orderList.length - 1];
+                            if (lastOrder.data && lastOrder.data.length > 0) {
+                                console.log('  - 最新预订数据字段:', Object.keys(lastOrder.data[0] || {}));
+                            }
+                        }
                     }
                 }, 2000);
                 
