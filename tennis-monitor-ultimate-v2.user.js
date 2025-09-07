@@ -615,11 +615,11 @@
     
     // ==================== PHASE 4: AUTO-REFRESH ====================
     
-    // Auto refresh page every 1 minute
+    // Auto refresh page every 2 minutes
     setTimeout(() => {
-        console.log('%c⏰ [AUTO-REFRESH] Starting 1-minute refresh timer', 'background: orange; color: white; font-weight: bold');
+        console.log('%c⏰ [AUTO-REFRESH] Starting 2-minute refresh timer', 'background: orange; color: white; font-weight: bold');
         
-        let refreshCountdown = 60; // seconds
+        let refreshCountdown = 120; // seconds
         
         // Create countdown display
         const countdownDisplay = document.createElement('div');
