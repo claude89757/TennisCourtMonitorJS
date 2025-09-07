@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Tennis Court Monitor Ultimate V2
 // @namespace    http://tampermonkey.net/
-// @version      7.0
-// @description  Ultimate anti-debugger bypass with aggressive injection and Airflow caching
+// @version      9.1
+// @description  Ultimate anti-debugger bypass with aggressive injection, Airflow caching and auto slider verification
 // @author       Claude
 // @match        https://wxsports.ydmap.cn/booking/schedule/*
 // @match        https://wxsports.ydmap.cn/*
@@ -234,6 +234,9 @@
             window.__venueNameMap = {}; // 场地ID到名称的映射
             window.__salesName = ''; // 网球场名称 (from salesName in config)
             window.__currentXhrUrl = null;
+            window.__currentTabDate = null; // 当前点击的tab日期信息
+            window.__lastApiCallTime = 0; // 最后一次API调用时间
+            window.__getVenueOrderListCallCount = 0; // getVenueOrderList调用次数
             
             // Hook JSON.parse to catch decrypted data
             const originalParse = JSON.parse;
@@ -285,6 +288,21 @@
                                 console.log('%c🎾 [预订信息] getVenueOrderList - 明文数据捕获成功!', 'background: blue; color: white; font-size: 14px; font-weight: bold');
                                 console.log('完整响应:', result);
                                 console.log('预订数量:', result.data.length);
+                                
+                                // Attach current tab date info to the result (make a copy to avoid reference issues)
+                                if (window.__currentTabDate) {
+                                    result.tabDateInfo = {
+                                        text: window.__currentTabDate.text,
+                                        weekday: window.__currentTabDate.weekday,
+                                        date: window.__currentTabDate.date,
+                                        fullText: window.__currentTabDate.fullText
+                                    };
+                                    result.isFromTabClick = true; // Mark as from tab click
+                                    console.log('附加tab日期信息:', result.tabDateInfo);
+                                } else {
+                                    result.isFromTabClick = false; // Mark as not from tab click (initial load)
+                                    console.log('%c⚠️ No tab date info, this is likely initial page load data', 'color: orange');
+                                }
                                 
                                 // Try to extract court name from booking data if not already set
                                 if (!window.__salesName && result.data.length > 0) {
@@ -389,6 +407,7 @@
                                 }
                                 
                                 window.__orderList.push(result);
+                                console.log('%c💾 [DATA] Saved order list #' + window.__orderList.length + ' with tab info:', 'color: cyan', result.tabDateInfo);
                             }
                         }
                     }
@@ -494,6 +513,13 @@
                 // Only log target API calls
                 if (url.includes('getVenueOrderList') || url.includes('getSportVenueConfig')) {
                     console.log('%c[API] ' + method + ' ' + url, 'color: gray; font-size: 11px');
+                    
+                    // Track getVenueOrderList calls
+                    if (url.includes('getVenueOrderList')) {
+                        window.__lastApiCallTime = Date.now();
+                        window.__getVenueOrderListCallCount++;
+                        console.log('%c📡 [API] getVenueOrderList call #' + window.__getVenueOrderListCallCount, 'color: blue');
+                    }
                 }
                 
                 return originalOpen.apply(this, arguments);
@@ -952,104 +978,162 @@
         
         // Process booking data to create formatted tables
         const bookingTable = [];
-        const availabilityTable = [];
+        const availabilityTable = {}; // New format as requested
         
         // Process all booking data
         if (unsafeWindow.__orderList && unsafeWindow.__orderList.length > 0) {
-            // Get the latest booking data
-            const latestOrder = unsafeWindow.__orderList[unsafeWindow.__orderList.length - 1];
+            console.log('%c📊 [AIRFLOW] Processing ' + unsafeWindow.__orderList.length + ' order lists', 'background: blue; color: white');
             
-            if (latestOrder.data && Array.isArray(latestOrder.data)) {
-                // Create booking summary table
-                latestOrder.data.forEach(item => {
-                    bookingTable.push({
-                        courtName: courtName,
-                        venueId: item.venueId || null,
-                        venueName: unsafeWindow.__venueNameMap[item.venueId] || item.venueName || '未知场地',
-                        status: item.dealId ? 'locked' : (item.orderId ? 'confirmed' : 'available'),
-                        statusText: item.dealId ? '已锁定' : (item.orderId ? '已确认' : '可用'),
-                        startTime: item.startTime || null,
-                        endTime: item.endTime || null,
-                        timeSlot: item.startTime ? 
-                            new Date(item.startTime).toLocaleTimeString('zh-CN', {hour: '2-digit', minute:'2-digit'}) + 
-                            '-' + 
-                            new Date(item.endTime).toLocaleTimeString('zh-CN', {hour: '2-digit', minute:'2-digit'}) 
-                            : null,
-                        price: item.price || null,
-                        date: item.startTime ? new Date(item.startTime).toLocaleDateString('zh-CN') : dateStr
-                    });
-                });
+            // Process all order lists to get data for different dates
+            unsafeWindow.__orderList.forEach((orderData, index) => {
+                console.log('%c📋 [AIRFLOW] Processing order list #' + (index + 1), 'color: gray');
+                console.log('  - Has tabDateInfo:', !!orderData.tabDateInfo);
+                console.log('  - Is from tab click:', orderData.isFromTabClick);
                 
-                // Calculate availability for each venue
-                const hours = Array.from({length: 16}, (_, i) => i + 7); // 7:00 to 22:00
-                const venueAvailability = {};
+                // Skip data not from tab click
+                if (!orderData.isFromTabClick) {
+                    console.log('%c⏭️ [AIRFLOW] Skipping order #' + (index + 1) + ' - not from tab click', 'color: orange');
+                    return;
+                }
                 
-                // Group bookings by venue ID
-                latestOrder.data.forEach(b => {
-                    if (b.venueId && b.startTime && b.endTime) {
-                        if (!venueAvailability[b.venueId]) {
-                            venueAvailability[b.venueId] = {
-                                booked: new Set(),
-                                name: unsafeWindow.__venueNameMap[b.venueId] || b.venueName || b.venueId
-                            };
-                        }
-                        const start = new Date(b.startTime).getHours();
-                        const end = new Date(b.endTime).getHours();
-                        for(let h = start; h < end; h++) {
-                            venueAvailability[b.venueId].booked.add(h);
-                        }
-                    }
-                });
+                if (orderData.tabDateInfo) {
+                    console.log('  - TabDateInfo content:', orderData.tabDateInfo);
+                }
                 
-                // Helper function to convert hours array to time ranges
-                const hoursToRanges = (hours) => {
-                    if (hours.length === 0) return [];
+                if (orderData.data && Array.isArray(orderData.data) && orderData.data.length > 0) {
+                    let dateKey = '';
                     
-                    const ranges = [];
-                    let start = hours[0];
-                    let end = hours[0];
-                    
-                    for (let i = 1; i < hours.length; i++) {
-                        if (hours[i] === end + 1) {
-                            end = hours[i];
-                        } else {
-                            ranges.push({
-                                start: start,
-                                end: end + 1,
-                                text: start + ':00-' + (end + 1) + ':00'
-                            });
-                            start = hours[i];
-                            end = hours[i];
+                    // First try to use tab date info if available
+                    if (orderData.tabDateInfo) {
+                        // Use the tab date info directly
+                        const tabInfo = orderData.tabDateInfo;
+                        console.log('%c📅 [AIRFLOW] Using tab date info for order #' + (index + 1) + ':', 'color: cyan', tabInfo);
+                        
+                        // Extract date and weekday from tab info
+                        // tabInfo.date might be like "12-25" or "12月25日"
+                        // tabInfo.weekday might be like "星期三" or "周三"
+                        
+                        if (tabInfo.date && tabInfo.weekday) {
+                            // Clean up date format
+                            let cleanDate = tabInfo.date.replace(/[月日]/g, '-').replace(/-$/, '');
+                            if (cleanDate.match(/^\d{1,2}-\d{1,2}$/)) {
+                                // Ensure two-digit format
+                                const parts = cleanDate.split('-');
+                                const month = parts[0].padStart(2, '0');
+                                const day = parts[1].padStart(2, '0');
+                                dateKey = `${month}-${day}(${tabInfo.weekday})`;
+                            } else {
+                                // Use full text as fallback
+                                dateKey = tabInfo.fullText || tabInfo.text || '';
+                            }
+                        } else if (tabInfo.fullText) {
+                            // Try to parse from full text
+                            const match = tabInfo.fullText.match(/(\d{1,2})[-月](\d{1,2})/);
+                            if (match) {
+                                const month = match[1].padStart(2, '0');
+                                const day = match[2].padStart(2, '0');
+                                const weekdayMatch = tabInfo.fullText.match(/(星期[一二三四五六日]|周[一二三四五六日])/);
+                                const weekday = weekdayMatch ? weekdayMatch[1] : '';
+                                dateKey = `${month}-${day}(${weekday})`;
+                            } else {
+                                dateKey = tabInfo.fullText;
+                            }
                         }
                     }
-                    ranges.push({
-                        start: start,
-                        end: end + 1,
-                        text: start + ':00-' + (end + 1) + ':00'
-                    });
-                    return ranges;
-                };
-                
-                // Build availability table
-                for (const venueId in venueAvailability) {
-                    const venue = venueAvailability[venueId];
-                    const available = hours.filter(h => !venue.booked.has(h));
-                    const timeRanges = hoursToRanges(available);
                     
-                    availabilityTable.push({
-                        courtName: courtName,
-                        venueId: venueId,
-                        venueName: venue.name,
-                        availableSlots: timeRanges.map(r => r.text),
-                        availableHours: available,
-                        availableHourCount: available.length,
-                        hasAvailability: available.length > 0,
-                        date: dateStr,
-                        bookedHours: Array.from(venue.booked).sort((a, b) => a - b),
-                        bookedHourCount: venue.booked.size
+                    // Skip data without tab date info (likely initial page load data)
+                    if (!dateKey) {
+                        console.log('%c⚠️ [AIRFLOW] Skipping data without tab date info (order #' + (index + 1) + ')', 'color: orange');
+                        console.log('  - This is likely initial page load data, not from tab click');
+                        return;
+                    }
+                    
+                    console.log('%c📅 [AIRFLOW] Processing date:', 'color: green', dateKey);
+                    
+                    // Initialize date entry if not exists
+                    if (!availabilityTable[dateKey]) {
+                        availabilityTable[dateKey] = {};
+                        console.log('%c✅ [AIRFLOW] Created new date entry for:', 'color: green', dateKey);
+                    } else {
+                        console.log('%c⚠️ [AIRFLOW] Date entry already exists for:', 'color: orange', dateKey);
+                    }
+                    
+                    // Calculate availability for each venue
+                    const hours = Array.from({length: 16}, (_, i) => i + 7); // 7:00 to 22:00
+                    const venueAvailability = {};
+                    
+                    // Group bookings by venue ID
+                    orderData.data.forEach(b => {
+                        if (b.venueId && b.startTime && b.endTime) {
+                            if (!venueAvailability[b.venueId]) {
+                                venueAvailability[b.venueId] = {
+                                    booked: new Set(),
+                                    name: unsafeWindow.__venueNameMap[b.venueId] || b.venueName || b.venueId
+                                };
+                            }
+                            const start = new Date(b.startTime).getHours();
+                            const end = new Date(b.endTime).getHours();
+                            for(let h = start; h < end; h++) {
+                                venueAvailability[b.venueId].booked.add(h);
+                            }
+                        }
+                    });
+                    
+                    // Helper function to convert hours array to time ranges
+                    const hoursToRanges = (hours) => {
+                        if (hours.length === 0) return [];
+                        
+                        const ranges = [];
+                        let start = hours[0];
+                        let end = hours[0];
+                        
+                        for (let i = 1; i < hours.length; i++) {
+                            if (hours[i] === end + 1) {
+                                end = hours[i];
+                            } else {
+                                ranges.push(start.toString().padStart(2, '0') + ':00-' + (end + 1).toString().padStart(2, '0') + ':00');
+                                start = hours[i];
+                                end = hours[i];
+                            }
+                        }
+                        ranges.push(start.toString().padStart(2, '0') + ':00-' + (end + 1).toString().padStart(2, '0') + ':00');
+                        return ranges;
+                    };
+                    
+                    // Build availability for each venue
+                    for (const venueId in venueAvailability) {
+                        const venue = venueAvailability[venueId];
+                        const available = hours.filter(h => !venue.booked.has(h));
+                        const timeRanges = hoursToRanges(available);
+                        
+                        // Add to new format
+                        const venueName = venue.name;
+                        if (timeRanges.length > 0) {
+                            availabilityTable[dateKey][venueName] = timeRanges;
+                        }
+                    }
+                    
+                    // Create booking summary table
+                    orderData.data.forEach(item => {
+                        bookingTable.push({
+                            courtName: courtName,
+                            venueId: item.venueId || null,
+                            venueName: unsafeWindow.__venueNameMap[item.venueId] || item.venueName || '未知场地',
+                            status: item.dealId ? 'locked' : (item.orderId ? 'confirmed' : 'available'),
+                            statusText: item.dealId ? '已锁定' : (item.orderId ? '已确认' : '可用'),
+                            startTime: item.startTime || null,
+                            endTime: item.endTime || null,
+                            timeSlot: item.startTime ? 
+                                new Date(item.startTime).toLocaleTimeString('zh-CN', {hour: '2-digit', minute:'2-digit'}) + 
+                                '-' + 
+                                new Date(item.endTime).toLocaleTimeString('zh-CN', {hour: '2-digit', minute:'2-digit'}) 
+                                : null,
+                            price: item.price || null,
+                            date: dateKey
+                        });
                     });
                 }
-            }
+            });
         }
         
         // Get venue configuration info
@@ -1081,7 +1165,7 @@
             
             // Formatted tables for easy processing
             bookingTable: bookingTable,
-            availabilityTable: availabilityTable,
+            availabilityTable: availabilityTable, // New format as requested
             
             // Venue configuration
             venueConfig: venueConfigInfo,
@@ -1090,9 +1174,7 @@
             summary: {
                 totalVenues: Object.keys(unsafeWindow.__venueNameMap || {}).length,
                 totalBookings: bookingTable.length,
-                totalAvailableSlots: availabilityTable.reduce((sum, v) => sum + v.availableHourCount, 0),
-                totalBookedSlots: availabilityTable.reduce((sum, v) => sum + v.bookedHourCount, 0),
-                venuesWithAvailability: availabilityTable.filter(v => v.hasAvailability).length,
+                totalDates: Object.keys(availabilityTable).length,
                 lastUpdate: timestamp
             },
             
@@ -1124,24 +1206,32 @@
             })));
         }
         
-        // Show availability table summary
-        if (availabilityTable.length > 0) {
-            console.log('%c⏰ 可用时段表 (availabilityTable):', 'background: green; color: white');
-            console.table(availabilityTable.map(a => ({
-                '场地': a.venueName,
-                '可用时段': a.availableSlots.join(', ') || '无',
-                '可用小时数': a.availableHourCount,
-                '已预订小时数': a.bookedHourCount
-            })));
+        // Show new format availability table
+        if (Object.keys(availabilityTable).length > 0) {
+            console.log('%c⏰ 可用时段表:', 'background: green; color: white');
+            console.log('availabilityTable:', availabilityTable);
+            
+            // Also show in table format for each date
+            for (const dateKey in availabilityTable) {
+                console.log(`%c📅 ${dateKey}:`, 'color: cyan; font-weight: bold');
+                const dateData = [];
+                for (const venueName in availabilityTable[dateKey]) {
+                    dateData.push({
+                        '场地': venueName,
+                        '可用时段': availabilityTable[dateKey][venueName].join(', ')
+                    });
+                }
+                if (dateData.length > 0) {
+                    console.table(dateData);
+                }
+            }
         }
         
         // Show summary statistics
         console.log('%c📈 汇总统计 (summary):', 'background: teal; color: white');
         console.log('  - 场地总数:', formattedData.summary.totalVenues);
         console.log('  - 预订记录数:', formattedData.summary.totalBookings);
-        console.log('  - 总可用时段:', formattedData.summary.totalAvailableSlots, '小时');
-        console.log('  - 总已订时段:', formattedData.summary.totalBookedSlots, '小时');
-        console.log('  - 有可用时段的场地数:', formattedData.summary.venuesWithAvailability);
+        console.log('  - 日期数量:', formattedData.summary.totalDates);
         
         // First try to update existing variable
         console.log('%c🔄 [AIRFLOW] Attempting to update variable: ' + variableKey, 'background: blue; color: white');
@@ -1279,19 +1369,673 @@
         }
     `);
     
-    // ==================== PHASE 6: AUTO-CLICK DATETIME TABS ====================
+    // ==================== PHASE 6: AUTO-SLIDER VERIFICATION ====================
     
-    // Auto-click all datetime tabs after page load
+    // Track retry attempts
+    let sliderRetryCount = 0;
+    const MAX_RETRY_ATTEMPTS = 3;
+    
+    // Auto-complete slider verification
+    const autoCompleteSlider = () => {
+        // First check if we already have data - if yes, skip slider check
+        if (unsafeWindow.__orderList && unsafeWindow.__orderList.length > 0) {
+            // We already have booking data, no need to check for slider
+            return false;
+        }
+        
+        // Check if we're on the actual booking page (not WAF page)
+        const isBookingPage = window.location.href.includes('/booking/schedule') || 
+                             document.querySelector('.schedule-container, .booking-container, .venue-list');
+        if (isBookingPage && !document.querySelector('#WAF_NC_WRAPPER, .waf-nc-wrapper')) {
+            // We're on booking page and no WAF wrapper, skip slider check
+            return false;
+        }
+        
+        console.log('%c🔍 [AUTO-SLIDER] Checking for WAF slider verification...', 'background: purple; color: white; font-weight: bold');
+        
+        // First check for retry button if verification failed
+        const retryButton = document.querySelector('button[onclick*="reload"], button[onclick*="refresh"], .refresh-button, #refresh-button, button:has(.refresh-icon), button:has(svg)');
+        const errorMessage = document.querySelector('.error-message, .fail-message, [id*="error"], [class*="error"], [id*="fail"], [class*="fail"]');
+        
+        // Also check for the specific error text shown in the image
+        const allTexts = document.querySelectorAll('p, div, span');
+        let hasErrorText = false;
+        for (const elem of allTexts) {
+            const text = elem.textContent || '';
+            if (text.includes('验证失败') || text.includes('请刷新重试') || text.includes('请重新验证')) {
+                hasErrorText = true;
+                break;
+            }
+        }
+        
+        // Check if there's an error message and retry button
+        if (hasErrorText || (errorMessage && errorMessage.textContent && (errorMessage.textContent.includes('验证失败') || errorMessage.textContent.includes('请刷新重试'))) || 
+            (retryButton && document.body.textContent.includes('验证失败'))) {
+            
+            sliderRetryCount++;
+            console.log(`%c🔄 [AUTO-SLIDER] Verification failed detected (Attempt ${sliderRetryCount}/${MAX_RETRY_ATTEMPTS})`, 'background: red; color: yellow; font-weight: bold');
+            
+            // If exceeded max retries, refresh the page
+            if (sliderRetryCount >= MAX_RETRY_ATTEMPTS) {
+                console.log('%c❌ [AUTO-SLIDER] Max retry attempts reached, will refresh page...', 'background: red; color: white; font-weight: bold');
+                
+                // Show countdown notification
+                const notification = document.createElement('div');
+                notification.style.cssText = `
+                    position: fixed;
+                    top: 50%;
+                    left: 50%;
+                    transform: translate(-50%, -50%);
+                    background: linear-gradient(135deg, #ff6b6b, #ff8e53);
+                    color: white;
+                    padding: 30px 40px;
+                    border-radius: 12px;
+                    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+                    z-index: 9999999;
+                    font-weight: bold;
+                    font-size: 18px;
+                    text-align: center;
+                    min-width: 300px;
+                `;
+                
+                let countdown = 3;
+                notification.innerHTML = `
+                    <div style="font-size: 24px; margin-bottom: 10px;">❌ 多次验证失败</div>
+                    <div>已尝试 ${sliderRetryCount} 次</div>
+                    <div>将在 <span id="countdown" style="font-size: 28px; color: #FFE66D;">${countdown}</span> 秒后刷新页面</div>
+                    <div style="font-size: 14px; margin-top: 10px; opacity: 0.9;">重新加载页面...</div>
+                `;
+                document.body.appendChild(notification);
+                
+                // Countdown and refresh
+                const countdownInterval = setInterval(() => {
+                    countdown--;
+                    const countdownElement = document.getElementById('countdown');
+                    if (countdownElement) {
+                        countdownElement.textContent = countdown;
+                    }
+                    
+                    if (countdown <= 0) {
+                        clearInterval(countdownInterval);
+                        notification.innerHTML = `
+                            <div style="font-size: 24px;">🔄 正在刷新页面...</div>
+                        `;
+                        
+                        // Reset retry count before refresh
+                        sliderRetryCount = 0;
+                        
+                        // Refresh the page after a short delay
+                        setTimeout(() => {
+                            console.log('%c🔄 [AUTO-SLIDER] Refreshing page now!', 'background: green; color: white; font-size: 14px; font-weight: bold');
+                            window.location.reload();
+                        }, 500);
+                    }
+                }, 1000);
+                
+                return true;
+            }
+            
+            // Otherwise, try clicking retry button
+            console.log('%c🔄 [AUTO-SLIDER] Attempting to click retry button...', 'background: orange; color: white');
+            
+            // Try to find and click the retry/refresh button
+            const buttons = document.querySelectorAll('button, a, div[role="button"], span[role="button"]');
+            for (const btn of buttons) {
+                const btnText = btn.textContent || '';
+                const btnHTML = btn.innerHTML || '';
+                
+                // Check if this is likely a retry/refresh button
+                if (btnText.includes('刷新') || btnText.includes('重试') || btnText.includes('重新') || 
+                    btnHTML.includes('refresh') || btnHTML.includes('reload') || 
+                    btn.className.includes('refresh') || btn.className.includes('retry')) {
+                    
+                    console.log('%c🎯 [AUTO-SLIDER] Found retry button, clicking...', 'background: green; color: white');
+                    btn.click();
+                    
+                    // Show notification
+                    const notification = document.createElement('div');
+                    notification.style.cssText = `
+                        position: fixed;
+                        top: 20px;
+                        right: 20px;
+                        background: linear-gradient(135deg, #ff9800, #f57c00);
+                        color: white;
+                        padding: 15px 20px;
+                        border-radius: 8px;
+                        box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+                        z-index: 9999999;
+                        font-weight: bold;
+                    `;
+                    notification.innerHTML = `🔄 正在重试滑块验证... (第${sliderRetryCount}次)`;
+                    document.body.appendChild(notification);
+                    setTimeout(() => notification.remove(), 3000);
+                    
+                    // Wait a bit and try again
+                    setTimeout(() => autoCompleteSlider(), 2000);
+                    return true;
+                }
+            }
+            
+            // If no specific retry button found, try clicking the circular refresh icon or any clickable element with SVG
+            const svgElements = document.querySelectorAll('svg, .icon-refresh, .icon-retry, [class*="refresh"], [class*="retry"]');
+            for (const svg of svgElements) {
+                // Check if it's inside a clickable parent
+                const clickableParent = svg.closest('button, a, div[onclick], span[onclick], div[role="button"], span[role="button"]');
+                if (clickableParent) {
+                    console.log('%c🎯 [AUTO-SLIDER] Found refresh icon, clicking parent...', 'background: green; color: white');
+                    clickableParent.click();
+                    
+                    // Show notification
+                    const notification = document.createElement('div');
+                    notification.style.cssText = `
+                        position: fixed;
+                        top: 20px;
+                        right: 20px;
+                        background: linear-gradient(135deg, #ff9800, #f57c00);
+                        color: white;
+                        padding: 15px 20px;
+                        border-radius: 8px;
+                        box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+                        z-index: 9999999;
+                        font-weight: bold;
+                    `;
+                    notification.innerHTML = `🔄 点击刷新按钮，重试验证... (第${sliderRetryCount}次)`;
+                    document.body.appendChild(notification);
+                    setTimeout(() => notification.remove(), 3000);
+                    
+                    setTimeout(() => autoCompleteSlider(), 2000);
+                    return true;
+                }
+            }
+            
+            // Last resort: look for any element that might be clickable in the error state
+            const errorContainer = document.querySelector('.waf-nc-wrapper, #WAF_NC_WRAPPER');
+            if (errorContainer && hasErrorText) {
+                // Find any element that looks like it could be clicked
+                const clickables = errorContainer.querySelectorAll('*');
+                for (const elem of clickables) {
+                    const computed = window.getComputedStyle(elem);
+                    // Check if element has pointer cursor or looks clickable
+                    if (computed.cursor === 'pointer' || 
+                        elem.tagName === 'BUTTON' || 
+                        elem.tagName === 'A' ||
+                        elem.onclick || 
+                        elem.getAttribute('onclick')) {
+                        
+                        console.log('%c🎯 [AUTO-SLIDER] Found clickable element in error state, clicking...', 'background: green; color: white');
+                        elem.click();
+                        setTimeout(() => autoCompleteSlider(), 2000);
+                        return true;
+                    }
+                }
+            }
+        }
+        
+        // Check if WAF verification page is present
+        const wafWrapper = document.querySelector('#WAF_NC_WRAPPER, .waf-nc-wrapper');
+        const sliderElement = document.querySelector('#aliyunCaptcha-sliding-slider, .aliyunCaptcha-sliding-slider');
+        const slidingBody = document.querySelector('#aliyunCaptcha-sliding-body, .sliding');
+        
+        if (wafWrapper && sliderElement && slidingBody) {
+            console.log('%c🎯 [AUTO-SLIDER] WAF slider verification detected!', 'background: red; color: yellow; font-weight: bold');
+            
+            // Show notification
+            const notification = document.createElement('div');
+            notification.style.cssText = `
+                position: fixed;
+                top: 20px;
+                right: 20px;
+                background: linear-gradient(135deg, #ff6b6b, #ff8e53);
+                color: white;
+                padding: 15px 20px;
+                border-radius: 8px;
+                box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+                z-index: 9999999;
+                font-weight: bold;
+                animation: pulse 1s infinite;
+            `;
+            notification.innerHTML = '🤖 正在自动完成滑块验证...';
+            document.body.appendChild(notification);
+            
+            setTimeout(() => {
+                try {
+                    // Get slider dimensions
+                    const sliderRect = sliderElement.getBoundingClientRect();
+                    const bodyRect = slidingBody.getBoundingClientRect();
+                    
+                    // Calculate the distance to slide (full width minus slider width, with more precise calculation)
+                    // Add extra distance to ensure it reaches the end
+                    const slideDistance = bodyRect.width - sliderRect.width + 5; // Add 5px to ensure completion
+                    
+                    console.log('%c📏 [AUTO-SLIDER] Slider dimensions:', 'color: cyan');
+                    console.log('  - Slider width:', sliderRect.width);
+                    console.log('  - Container width:', bodyRect.width);
+                    console.log('  - Slide distance:', slideDistance);
+                    
+                    // Simulate mouse down on slider - use most compatible approach
+                    try {
+                        // Try the simplest approach first
+                        const startX = sliderRect.left + sliderRect.width / 2;
+                        const startY = sliderRect.top + sliderRect.height / 2;
+                        
+                        // Create and dispatch mousedown
+                        const mouseDownEvent = document.createEvent('MouseEvent');
+                        try {
+                            // Try with window first
+                            mouseDownEvent.initMouseEvent(
+                                'mousedown', true, true, unsafeWindow || window,
+                                0, 0, 0, startX, startY,
+                                false, false, false, false, 0, null
+                            );
+                        } catch (e) {
+                            // Fallback without window parameter
+                            mouseDownEvent.initMouseEvent(
+                                'mousedown', true, true, null,
+                                0, 0, 0, startX, startY,
+                                false, false, false, false, 0, null
+                            );
+                        }
+                        sliderElement.dispatchEvent(mouseDownEvent);
+                    } catch (e) {
+                        console.log('%c⚠️ [AUTO-SLIDER] MouseEvent creation failed, using alternative', 'color: orange');
+                        // Ultra-fallback: use simple Event
+                        const evt = new Event('mousedown', { bubbles: true, cancelable: true });
+                        evt.clientX = sliderRect.left + sliderRect.width / 2;
+                        evt.clientY = sliderRect.top + sliderRect.height / 2;
+                        sliderElement.dispatchEvent(evt);
+                    }
+                    
+                    // Simulate smooth dragging motion with human-like behavior
+                    let currentX = sliderRect.left + sliderRect.width / 2;
+                    const targetX = currentX + slideDistance;
+                    const steps = 50; // More steps for smoother motion
+                    const stepDistance = slideDistance / steps;
+                    
+                    // Variable delay for more human-like motion (slower at start and end)
+                    const getStepDelay = (stepIndex) => {
+                        if (stepIndex < 5 || stepIndex > steps - 5) {
+                            return 50 + Math.random() * 20; // Slower at start and end
+                        }
+                        return 25 + Math.random() * 15; // Faster in the middle
+                    };
+                    
+                    let stepCount = 0;
+                    
+                    // Use recursive setTimeout for variable delays
+                    const performDrag = () => {
+                        stepCount++;
+                        
+                        // Add slight randomness to movement for more human-like behavior
+                        const randomOffset = (Math.random() - 0.5) * 2; // Small random offset
+                        currentX += stepDistance + randomOffset;
+                        
+                        // Ensure we don't overshoot
+                        if (currentX > targetX) {
+                            currentX = targetX;
+                        }
+                        
+                        // Simulate mouse move - use most compatible approach
+                        try {
+                            const mouseMoveEvent = document.createEvent('MouseEvent');
+                            try {
+                                mouseMoveEvent.initMouseEvent(
+                                    'mousemove', true, true, unsafeWindow || window,
+                                    0, 0, 0, currentX, sliderRect.top + sliderRect.height / 2,
+                                    false, false, false, false, 0, null
+                                );
+                            } catch (e) {
+                                mouseMoveEvent.initMouseEvent(
+                                    'mousemove', true, true, null,
+                                    0, 0, 0, currentX, sliderRect.top + sliderRect.height / 2,
+                                    false, false, false, false, 0, null
+                                );
+                            }
+                            document.dispatchEvent(mouseMoveEvent);
+                            
+                            // Also dispatch on slider element directly
+                            sliderElement.dispatchEvent(mouseMoveEvent);
+                        } catch (e) {
+                            // Fallback to simple event
+                            const evt = new Event('mousemove', { bubbles: true, cancelable: true });
+                            evt.clientX = currentX;
+                            evt.clientY = sliderRect.top + sliderRect.height / 2;
+                            document.dispatchEvent(evt);
+                            sliderElement.dispatchEvent(evt);
+                        }
+                        
+                        // Update visual position if possible
+                        if (sliderElement.style) {
+                            const moveDistance = currentX - sliderRect.left - sliderRect.width / 2;
+                            sliderElement.style.left = moveDistance + 'px';
+                            sliderElement.style.transform = `translateX(${moveDistance}px)`;
+                        }
+                        
+                        // Also update the progress bar if it exists
+                        const progressBar = document.querySelector('#aliyunCaptcha-sliding-left, .aliyunCaptcha-sliding-slided');
+                        if (progressBar && progressBar.style) {
+                            const progressWidth = currentX - sliderRect.left;
+                            progressBar.style.width = progressWidth + 'px';
+                        }
+                        
+                        if (stepCount >= steps || currentX >= targetX) {
+                            
+                            // Simulate mouse up at the end position
+                            setTimeout(() => {
+                                try {
+                                    const mouseUpEvent = document.createEvent('MouseEvent');
+                                    try {
+                                        mouseUpEvent.initMouseEvent(
+                                            'mouseup', true, true, unsafeWindow || window,
+                                            0, 0, 0, targetX, sliderRect.top + sliderRect.height / 2,
+                                            false, false, false, false, 0, null
+                                        );
+                                    } catch (e) {
+                                        mouseUpEvent.initMouseEvent(
+                                            'mouseup', true, true, null,
+                                            0, 0, 0, targetX, sliderRect.top + sliderRect.height / 2,
+                                            false, false, false, false, 0, null
+                                        );
+                                    }
+                                    document.dispatchEvent(mouseUpEvent);
+                                } catch (e) {
+                                    // Fallback to simple event
+                                    const evt = new Event('mouseup', { bubbles: true, cancelable: true });
+                                    evt.clientX = targetX;
+                                    evt.clientY = sliderRect.top + sliderRect.height / 2;
+                                    document.dispatchEvent(evt);
+                                }
+                                
+                                console.log('%c✅ [AUTO-SLIDER] Slider verification completed!', 'background: green; color: white; font-size: 14px; font-weight: bold');
+                                
+                                // Reset retry count on success
+                                sliderRetryCount = 0;
+                                
+                                // Update notification
+                                notification.style.background = 'linear-gradient(135deg, #4CAF50, #45a049)';
+                                notification.innerHTML = '✅ 滑块验证已完成!';
+                                
+                                // Remove notification after 3 seconds
+                                setTimeout(() => {
+                                    notification.remove();
+                                }, 3000);
+                                
+                            }, 100);
+                        } else {
+                            // Continue dragging with variable delay
+                            setTimeout(performDrag, getStepDelay(stepCount));
+                        }
+                    };
+                    
+                    // Start the drag operation after initial delay
+                    setTimeout(performDrag, 200);
+                    
+                    // Alternative method: Try touch events if mouse events don't work
+                    setTimeout(() => {
+                        // Check if slider hasn't moved
+                        const newSliderRect = sliderElement.getBoundingClientRect();
+                        if (Math.abs(newSliderRect.left - sliderRect.left) < 10) {
+                            console.log('%c⚠️ [AUTO-SLIDER] Mouse events failed, trying touch events...', 'background: orange; color: white');
+                            
+                            // Try touch events instead
+                            try {
+                                const touch = {
+                                    identifier: 0,
+                                    target: sliderElement,
+                                    clientX: sliderRect.left + sliderRect.width / 2,
+                                    clientY: sliderRect.top + sliderRect.height / 2,
+                                    screenX: sliderRect.left + sliderRect.width / 2,
+                                    screenY: sliderRect.top + sliderRect.height / 2,
+                                    pageX: sliderRect.left + sliderRect.width / 2,
+                                    pageY: sliderRect.top + sliderRect.height / 2,
+                                    radiusX: 1,
+                                    radiusY: 1,
+                                    rotationAngle: 0,
+                                    force: 1
+                                };
+                                
+                                // Touch start
+                                const touchStartEvent = new TouchEvent('touchstart', {
+                                    bubbles: true,
+                                    cancelable: true,
+                                    touches: [touch],
+                                    targetTouches: [touch],
+                                    changedTouches: [touch]
+                                });
+                                sliderElement.dispatchEvent(touchStartEvent);
+                                
+                                // Simulate drag with touch move
+                                let touchX = sliderRect.left + sliderRect.width / 2;
+                                const touchSteps = 20;
+                                const touchStepDistance = slideDistance / touchSteps;
+                                
+                                for (let i = 0; i < touchSteps; i++) {
+                                    touchX += touchStepDistance;
+                                    touch.clientX = touchX;
+                                    touch.pageX = touchX;
+                                    touch.screenX = touchX;
+                                    
+                                    const touchMoveEvent = new TouchEvent('touchmove', {
+                                        bubbles: true,
+                                        cancelable: true,
+                                        touches: [touch],
+                                        targetTouches: [touch],
+                                        changedTouches: [touch]
+                                    });
+                                    document.dispatchEvent(touchMoveEvent);
+                                }
+                                
+                                // Touch end
+                                touch.clientX = sliderRect.left + slideDistance;
+                                touch.pageX = sliderRect.left + slideDistance;
+                                touch.screenX = sliderRect.left + slideDistance;
+                                
+                                const touchEndEvent = new TouchEvent('touchend', {
+                                    bubbles: true,
+                                    cancelable: true,
+                                    touches: [],
+                                    targetTouches: [],
+                                    changedTouches: [touch]
+                                });
+                                document.dispatchEvent(touchEndEvent);
+                                
+                                console.log('%c✅ [AUTO-SLIDER] Touch events dispatched', 'background: blue; color: white');
+                            } catch (touchError) {
+                                console.log('%c⚠️ [AUTO-SLIDER] Touch events failed, trying direct manipulation...', 'background: orange; color: white');
+                                console.error(touchError);
+                            }
+                        }
+                    }, 1500);
+                    
+                    // Final fallback: Direct manipulation if all events don't work
+                    setTimeout(() => {
+                        // Check if slider still hasn't moved
+                        const finalSliderRect = sliderElement.getBoundingClientRect();
+                        if (Math.abs(finalSliderRect.left - sliderRect.left) < 10) {
+                            console.log('%c⚠️ [AUTO-SLIDER] All event simulations failed, trying direct manipulation...', 'background: orange; color: white');
+                            
+                            // Try to directly set the slider position
+                            if (sliderElement.style) {
+                                sliderElement.style.left = slideDistance + 'px';
+                                sliderElement.style.transform = `translateX(${slideDistance}px)`;
+                            }
+                            
+                            // Look for success indicator or completion callback
+                            const slidingLeft = document.querySelector('#aliyunCaptcha-sliding-left, .aliyunCaptcha-sliding-slided');
+                            if (slidingLeft && slidingLeft.style) {
+                                slidingLeft.style.width = slideDistance + 'px';
+                            }
+                            
+                            // Try to trigger any completion handlers
+                            if (window.aliyunCaptcha && typeof window.aliyunCaptcha.complete === 'function') {
+                                window.aliyunCaptcha.complete();
+                            }
+                            
+                            // Check for nc object (common in Aliyun captcha)
+                            if (window.nc && typeof window.nc.reset === 'function') {
+                                // Sometimes need to get the token
+                                if (window.nc.getToken) {
+                                    const token = window.nc.getToken();
+                                    console.log('Token obtained:', token);
+                                }
+                            }
+                        }
+                    }, 2000);
+                    
+                } catch (error) {
+                    console.log('%c❌ [AUTO-SLIDER] Error during slider verification:', 'background: red; color: white');
+                    console.error(error);
+                    
+                    notification.style.background = 'linear-gradient(135deg, #f44336, #d32f2f)';
+                    notification.innerHTML = '❌ 滑块验证失败，请手动完成';
+                    setTimeout(() => notification.remove(), 5000);
+                }
+            }, 1000); // Wait 1 second before attempting
+            
+            return true; // Slider was found and attempted
+        }
+        
+        return false; // No slider found
+    };
+    
+    // Check for slider on page load and periodically
     setTimeout(() => {
-        console.log('%c🔍 [AUTO-CLICK] Looking for datetime tabs...', 'background: blue; color: white; font-weight: bold');
+        if (autoCompleteSlider()) {
+            console.log('%c✅ [AUTO-SLIDER] Initial slider check completed', 'background: green; color: white');
+        } else {
+            console.log('%c📋 [AUTO-SLIDER] No slider verification detected on initial check', 'color: gray');
+        }
+    }, 2000);
+    
+    // Also check periodically in case slider appears later, but only if needed
+    let sliderCheckInterval = setInterval(() => {
+        // Stop checking if we have data
+        if (unsafeWindow.__orderList && unsafeWindow.__orderList.length > 0) {
+            console.log('%c✅ [AUTO-SLIDER] Data loaded, stopping slider checks', 'color: green');
+            clearInterval(sliderCheckInterval);
+            // Also disconnect the observer
+            if (sliderObserver) {
+                sliderObserver.disconnect();
+            }
+            return;
+        }
+        
+        // Only check if there's a WAF wrapper visible
+        if (document.querySelector('#WAF_NC_WRAPPER, .waf-nc-wrapper')) {
+            autoCompleteSlider();
+        }
+    }, 5000); // Check every 5 seconds
+    
+    // Listen for DOM changes to detect when slider appears
+    const sliderObserver = new MutationObserver((mutations) => {
+        // Skip if we already have data
+        if (unsafeWindow.__orderList && unsafeWindow.__orderList.length > 0) {
+            return;
+        }
+        
+        // Check if WAF wrapper was added
+        for (const mutation of mutations) {
+            for (const node of mutation.addedNodes) {
+                if (node.nodeType === 1) { // Element node
+                    if (node.id === 'WAF_NC_WRAPPER' || 
+                        node.className === 'waf-nc-wrapper' ||
+                        (node.querySelector && node.querySelector('.waf-nc-wrapper, #WAF_NC_WRAPPER'))) {
+                        console.log('%c🚨 [AUTO-SLIDER] WAF verification detected via DOM mutation!', 'background: red; color: yellow; font-weight: bold');
+                        setTimeout(() => autoCompleteSlider(), 500);
+                        break;
+                    }
+                }
+            }
+        }
+    });
+    
+    // Start observing DOM changes only if body exists
+    if (document.body) {
+        sliderObserver.observe(document.body, {
+            childList: true,
+            subtree: true
+        });
+    } else {
+        // Wait for body to be available
+        const bodyWaitInterval = setInterval(() => {
+            if (document.body) {
+                clearInterval(bodyWaitInterval);
+                sliderObserver.observe(document.body, {
+                    childList: true,
+                    subtree: true
+                });
+            }
+        }, 100);
+    }
+    
+    console.log('%c🛡️ [AUTO-SLIDER] WAF slider auto-completion enabled', 'background: purple; color: white; font-weight: bold');
+    
+    // ==================== PHASE 7: AUTO-CLICK DATETIME TABS ====================
+    
+    // Track if we've already clicked tabs to avoid duplicates
+    let hasClickedTabs = false;
+    
+    // Auto-click all datetime tabs after page load with better timing
+    const waitForDateTimeTabs = () => {
+        // Avoid duplicate execution
+        if (hasClickedTabs) {
+            console.log('%c⏭️ [AUTO-CLICK] Already clicked tabs, skipping...', 'color: gray');
+            return;
+        }
+        
+        console.log('%c🔍 [AUTO-CLICK] Waiting for page to load datetime tabs...', 'background: blue; color: white; font-weight: bold');
+        
+        let checkCount = 0;
+        const maxChecks = 20; // Try for up to 20 seconds
+        
+        const checkForTabs = setInterval(() => {
+            checkCount++;
+            
+            // Check if page has loaded and tabs are available
+            // Look for container elements that might hold date tabs
+            const containerElements = document.querySelectorAll('.inline-flex, [class*="flex"], [class*="tab"], .date-container');
+            const weekElements = document.querySelectorAll('div.week, div.dt, .week, .dt, [class*="week"], [class*="date"]');
+            const hasWeekdayText = document.body && (
+                document.body.textContent.includes('星期') || 
+                document.body.textContent.includes('周一') ||
+                document.body.textContent.includes('今天')
+            );
+            
+            // Check for containers with both week and date
+            let hasDateContainers = false;
+            containerElements.forEach(container => {
+                const weekEl = container.querySelector('.week, .dt.week');
+                const dateEl = container.querySelector('.datetime, .dt.datetime');
+                if (weekEl && dateEl) {
+                    hasDateContainers = true;
+                }
+            });
+            
+            console.log(`%c🔍 [AUTO-CLICK] Check #${checkCount}: Found ${weekElements.length} potential tab elements`, 'color: gray');
+            
+            if (hasDateContainers || weekElements.length > 0 || hasWeekdayText) {
+                clearInterval(checkForTabs);
+                console.log('%c✅ [AUTO-CLICK] Page loaded, starting auto-click...', 'background: green; color: white; font-weight: bold');
+                hasClickedTabs = true; // Mark as clicked
+                clickDateTimeTabs();
+            } else if (checkCount >= maxChecks) {
+                clearInterval(checkForTabs);
+                console.log('%c⚠️ [AUTO-CLICK] Timeout waiting for tabs, attempting anyway...', 'background: orange; color: white');
+                hasClickedTabs = true; // Mark as clicked
+                clickDateTimeTabs();
+            }
+        }, 1000); // Check every second
         
         const clickDateTimeTabs = async () => {
             console.log('%c🔍 [AUTO-CLICK] Searching for weekday tabs...', 'background: blue; color: white');
             
-            // Simple and precise: target div.week or div.dt elements
-            const weekdayElements = document.querySelectorAll('div.week, div.dt, .week, .dt');
+            // Track clicked dates to avoid duplicates
+            const clickedDates = new Set();
+            
+            // More comprehensive selectors for weekday tabs, but avoid duplicates
+            const allElements = document.querySelectorAll('div.week, div.dt, .week, .dt, [class*="week"]:not([class*="weekend"]), [class*="date"], .date-tab, .weekday-tab, .schedule-date');
             const weekdayTabs = [];
             const processedTexts = new Set();
+            const processedElements = new Set(); // Track processed elements to avoid duplicates
             
             // Also check for weekday patterns
             const weekdayPatterns = [
@@ -1301,83 +2045,85 @@
                 /今天|明天|后天/
             ];
             
-            // First pass: find the currently visible/active tab by checking computed styles
-            let activeTabText = null;
-            weekdayElements.forEach(el => {
-                const text = (el.textContent || '').trim();
-                const hasWeekday = weekdayPatterns.some(pattern => pattern.test(text));
+            // Collect all tabs without checking for active tab
+            console.log('%c📋 [AUTO-CLICK] Collecting all date tabs...', 'background: blue; color: white');
+            
+            // Second pass: collect clickable tabs, looking for container elements
+            // Try to find parent containers that hold both weekday and date
+            const containerElements = document.querySelectorAll('.inline-flex, [class*="flex"], [class*="tab"], .date-container');
+            
+            containerElements.forEach(container => {
+                // Check if this container has both week and date elements
+                const weekElement = container.querySelector('.week, .dt.week, [class*="week"]');
+                const dateElement = container.querySelector('.datetime, .dt.datetime, [class*="date"]:not([class*="week"])');
                 
-                if (hasWeekday) {
-                    // Check various ways to detect if this is the current tab
-                    const computedStyle = window.getComputedStyle(el);
-                    const parentStyle = el.parentElement ? window.getComputedStyle(el.parentElement) : null;
+                if (weekElement && dateElement) {
+                    const weekText = (weekElement.textContent || '').trim();
+                    const dateText = (dateElement.textContent || '').trim();
+                    const fullText = `${weekText} ${dateText}`;
                     
-                    // Check for distinctive active styles
-                    const possiblyActive = 
-                        // Check element's own styles
-                        computedStyle.backgroundColor !== 'rgba(0, 0, 0, 0)' && 
-                        computedStyle.backgroundColor !== 'transparent' &&
-                        computedStyle.backgroundColor !== '' ||
-                        computedStyle.color === 'rgb(255, 255, 255)' || // Often active tabs have white text
-                        computedStyle.fontWeight === 'bold' ||
-                        computedStyle.fontWeight === '700' ||
-                        // Check parent's styles
-                        (parentStyle && (
-                            parentStyle.backgroundColor !== 'rgba(0, 0, 0, 0)' && 
-                            parentStyle.backgroundColor !== 'transparent'
-                        )) ||
-                        // Check classes
-                        el.classList.contains('active') ||
-                        el.classList.contains('selected') ||
-                        el.classList.contains('on') ||
-                        (el.parentElement && (
-                            el.parentElement.classList.contains('active') ||
-                            el.parentElement.classList.contains('selected')
-                        ));
-                    
-                    if (possiblyActive && !activeTabText) {
-                        activeTabText = text;
-                        console.log('%c🎯 Detected current active tab: ' + text, 'background: red; color: yellow; font-weight: bold');
-                        console.log('  Background:', computedStyle.backgroundColor);
-                        console.log('  Color:', computedStyle.color);
-                        console.log('  Classes:', el.className);
+                    // Add all tabs without skipping any
+                    if (!processedTexts.has(fullText) && !processedElements.has(container)) {
+                        const rect = container.getBoundingClientRect();
+                        if (rect.width > 0 && rect.height > 0) {
+                            weekdayTabs.push({
+                                element: container,
+                                text: fullText,
+                                weekday: weekText,
+                                date: dateText,
+                                rect: rect
+                            });
+                            processedTexts.add(fullText);
+                            processedElements.add(container);
+                            console.log('%c✓ Found date tab container: ' + fullText, 'color: cyan');
+                        }
                     }
                 }
             });
             
-            // If no active tab detected by styles, assume the first visible one is active
-            if (!activeTabText) {
-                console.log('%c⚠️ Could not detect active tab by styles, will click all visible tabs', 'color: orange');
+            // Fallback: if no containers found, try individual elements
+            if (weekdayTabs.length === 0) {
+                allElements.forEach(el => {
+                    // Skip if already processed this element
+                    if (processedElements.has(el)) {
+                        return;
+                    }
+                    
+                    const text = (el.textContent || '').trim();
+                    
+                    // Process all tabs without skipping
+                    
+                    // Check if contains weekday text and not already processed
+                    const hasWeekday = weekdayPatterns.some(pattern => pattern.test(text));
+                    
+                    if (hasWeekday && !processedTexts.has(text)) {
+                        const rect = el.getBoundingClientRect();
+                        
+                        // Only add visible elements
+                        if (rect.width > 0 && rect.height > 0) {
+                            // Check for parent-child relationships to avoid duplicates
+                            let isDuplicate = false;
+                            for (const existing of weekdayTabs) {
+                                if (existing.element.contains(el) || el.contains(existing.element)) {
+                                    isDuplicate = true;
+                                    break;
+                                }
+                            }
+                            
+                            if (!isDuplicate) {
+                                weekdayTabs.push({
+                                    element: el,
+                                    text: text,
+                                    rect: rect
+                                });
+                                processedTexts.add(text);
+                                processedElements.add(el);
+                                console.log('%c✓ Will click weekday element: ' + text, 'color: cyan');
+                            }
+                        }
+                    }
+                });
             }
-            
-            // Second pass: collect clickable tabs, skipping the active one
-            weekdayElements.forEach(el => {
-                const text = (el.textContent || '').trim();
-                
-                // Skip if this is the active tab we detected
-                if (activeTabText && text === activeTabText) {
-                    console.log('%c⏭️ Skipping current active tab: ' + text, 'background: orange; color: white; font-weight: bold');
-                    return;
-                }
-                
-                // Check if contains weekday text and not already processed
-                const hasWeekday = weekdayPatterns.some(pattern => pattern.test(text));
-                
-                if (hasWeekday && !processedTexts.has(text)) {
-                    const rect = el.getBoundingClientRect();
-                    
-                    // Only add visible elements
-                    if (rect.width > 0 && rect.height > 0) {
-                        weekdayTabs.push({
-                            element: el,
-                            text: text,
-                            rect: rect
-                        });
-                        processedTexts.add(text);
-                        console.log('%c✓ Will click weekday element: ' + text, 'color: cyan');
-                    }
-                }
-            });
             
             // Sort by position (left to right)
             weekdayTabs.sort((a, b) => {
@@ -1418,16 +2164,31 @@
                     console.log('  ' + (index + 1) + '. ' + tab.text);
                 });
                 
-                // Show which tab was skipped
-                if (activeTabText) {
-                    console.log('%c⏭️ Active tab detected and skipped: ' + activeTabText, 'background: orange; color: white; font-weight: bold');
-                }
+                // Print all tabs that will be clicked
+                console.log('%c📋 [AUTO-CLICK] Found ' + weekdayTabs.length + ' tabs to click:', 'background: purple; color: white; font-weight: bold');
+                weekdayTabs.forEach((tab, index) => {
+                    console.log(`  ${index + 1}. ${tab.date || ''} ${tab.weekday || ''} (${tab.text})`);
+                });
+                console.table(weekdayTabs.map((tab, index) => ({
+                    '序号': index + 1,
+                    '日期': tab.date || 'N/A',
+                    '星期': tab.weekday || 'N/A',
+                    '完整文本': tab.text
+                })));
                 
                 // Click each tab with delay
                 for (let i = 0; i < weekdayTabs.length; i++) {
                     const tabInfo = weekdayTabs[i];
                     const tab = tabInfo.element;
                     const tabText = tabInfo.text;
+                    const dateKey = tabInfo.date || tabText; // Use date field if available
+                    
+                    // Skip if already clicked this date
+                    if (clickedDates.has(dateKey)) {
+                        console.log('%c⏭️ [AUTO-CLICK] Already clicked date: ' + dateKey + ', skipping...', 'color: gray');
+                        continue;
+                    }
+                    clickedDates.add(dateKey);
                     
                     // Update status
                     if (statusDisplay) {
@@ -1435,7 +2196,7 @@
                             🤖 自动点击日期标签...<br>
                             进度: ${i + 1}/${weekdayTabs.length}<br>
                             当前: ${tabText}<br>
-                            <small>等待5秒加载数据...</small>
+                            <small>等待数据加载 (最多20秒)...</small>
                         `;
                     }
                     
@@ -1452,8 +2213,17 @@
                         // Scroll into view if needed
                         tab.scrollIntoView({ behavior: 'smooth', block: 'center' });
                         
-                        // Small delay for scroll
-                        await new Promise(resolve => setTimeout(resolve, 500));
+                        // Wait for scroll animation to complete
+                        await new Promise(resolve => setTimeout(resolve, 1500));
+                        
+                        // Save current tab date info before clicking
+                        unsafeWindow.__currentTabDate = {
+                            text: tabText,
+                            weekday: tabInfo.weekday || '',
+                            date: tabInfo.date || '',
+                            fullText: tabInfo.text || tabText
+                        };
+                        console.log('%c📅 [AUTO-CLICK] Saving tab date info:', 'color: cyan', unsafeWindow.__currentTabDate);
                         
                         // Click the tab
                         tab.click();
@@ -1461,13 +2231,75 @@
                         
                         console.log('%c✅ [AUTO-CLICK] Clicked tab #' + (i + 1) + ': ' + tabText, 'background: green; color: white');
                         
-                        // Wait for data to load (5 seconds between clicks)
-                        await new Promise(resolve => setTimeout(resolve, 5000));
+                        // Add a delay after click to allow page to respond
+                        await new Promise(resolve => setTimeout(resolve, 1000));
+                        
+                        // Wait for data to load and be captured
+                        const dataLoadStartTime = Date.now();
+                        const maxWaitTime = 20000; // Max 20 seconds per tab
+                        let dataLoaded = false;
+                        
+                        // Store the current data count and API call count before click
+                        const previousOrderCount = unsafeWindow.__orderList ? unsafeWindow.__orderList.length : 0;
+                        const previousApiCallCount = unsafeWindow.__getVenueOrderListCallCount || 0;
+                        
+                        console.log('%c⏳ [AUTO-CLICK] Waiting for getVenueOrderList API call...', 'color: cyan');
+                        console.log('  - Previous API call count:', previousApiCallCount);
+                        console.log('  - Previous data count:', previousOrderCount);
+                        
+                        // First wait for API call
+                        let apiCalled = false;
+                        const apiWaitStartTime = Date.now();
+                        while (!apiCalled && (Date.now() - apiWaitStartTime) < 5000) { // Wait up to 5 seconds for API call
+                            await new Promise(resolve => setTimeout(resolve, 500));
+                            
+                            const currentApiCallCount = unsafeWindow.__getVenueOrderListCallCount || 0;
+                            if (currentApiCallCount > previousApiCallCount) {
+                                apiCalled = true;
+                                console.log('%c📡 [AUTO-CLICK] getVenueOrderList API called! Call #' + currentApiCallCount, 'background: blue; color: white');
+                            }
+                        }
+                        
+                        if (!apiCalled) {
+                            console.log('%c⚠️ [AUTO-CLICK] No API call detected for tab: ' + tabText, 'background: orange; color: white');
+                        }
+                        
+                        // Then wait for data to be captured
+                        while (!dataLoaded && (Date.now() - dataLoadStartTime) < maxWaitTime) {
+                            await new Promise(resolve => setTimeout(resolve, 1000)); // Check every 1 second
+                            
+                            // Check if new data has been captured
+                            const currentOrderCount = unsafeWindow.__orderList ? unsafeWindow.__orderList.length : 0;
+                            
+                            if (currentOrderCount > previousOrderCount) {
+                                dataLoaded = true;
+                                console.log('%c✅ [AUTO-CLICK] Data captured! New data count: ' + currentOrderCount, 'background: green; color: white');
+                                
+                                // Wait more to ensure all data is fully processed
+                                await new Promise(resolve => setTimeout(resolve, 2000));
+                            }
+                            
+                            // Also check for loading indicators
+                            const loadingIndicator = document.querySelector('.loading, .spinner, [class*="loading"], [class*="spinner"]');
+                            if (loadingIndicator) {
+                                console.log('%c⏳ [AUTO-CLICK] Loading indicator detected, waiting...', 'color: gray');
+                            }
+                        }
+                        
+                        if (!dataLoaded) {
+                            console.log('%c⚠️ [AUTO-CLICK] Timeout waiting for data on tab: ' + tabText, 'background: orange; color: white');
+                        }
                         
                         // Restore original style
                         tab.style.border = originalBorder;
                         tab.style.background = originalBackground;
                         tab.style.boxShadow = originalBoxShadow;
+                        
+                        // Add delay before clicking next tab
+                        if (i < weekdayTabs.length - 1) {
+                            console.log('%c⏸️ [AUTO-CLICK] Pausing before next tab...', 'color: gray');
+                            await new Promise(resolve => setTimeout(resolve, 2000)); // 2 second pause between tabs
+                        }
                         
                     } catch(e) {
                         console.log('%c❌ [AUTO-CLICK] Failed to click tab: ' + tabText, 'color: red');
@@ -1533,15 +2365,16 @@
                 console.log('Looking for elements with patterns: 周一-周日, 星期一-星期日, 今天, 明天, 后天, or date format like 12月25日');
             }
         };
-        
-        // Execute auto-click
-        clickDateTimeTabs();
-        
-        // Also set up to run after each refresh
-        window.addEventListener('load', () => {
-            setTimeout(clickDateTimeTabs, 3000);
-        });
-        
-    }, 5000); // Wait 5 seconds after page load to ensure everything is rendered
+    };
+    
+    // Start waiting for tabs with initial delay to ensure page is ready
+    setTimeout(() => {
+        // Only run auto-click if we're on the booking page and not blocked by WAF
+        if (!document.querySelector('#WAF_NC_WRAPPER, .waf-nc-wrapper')) {
+            waitForDateTimeTabs();
+        } else {
+            console.log('%c⚠️ [AUTO-CLICK] WAF detected, skipping auto-click', 'background: orange; color: white');
+        }
+    }, 3000); // Initial 3 second delay
     
 })();
