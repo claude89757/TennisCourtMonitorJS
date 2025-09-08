@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tennis Court Monitor Ultimate V2
 // @namespace    http://tampermonkey.net/
-// @version      9.1
+// @version      9.2
 // @description  Ultimate anti-debugger bypass with aggressive injection, Airflow caching and auto slider verification
 // @author       Claude
 // @match        https://wxsports.ydmap.cn/booking/schedule/*
@@ -15,11 +15,229 @@
 // @grant        GM_xmlhttpRequest
 // @grant        GM_setValue
 // @grant        GM_getValue
+// @grant        GM_notification
 // @run-at       document-start
+// @updateURL    https://raw.githubusercontent.com/claude89757/TennisCourtMonitorJS/main/tennis-monitor-ultimate-v2.user.js
+// @downloadURL  https://raw.githubusercontent.com/claude89757/TennisCourtMonitorJS/main/tennis-monitor-ultimate-v2.user.js
+// @homepageURL  https://github.com/claude89757/TennisCourtMonitorJS
 // ==/UserScript==
 
 (function() {
     'use strict';
+    
+    // ==================== VERSION CHECK AND AUTO-UPDATE ====================
+    
+    const CURRENT_VERSION = '9.2';
+    const GITHUB_RAW_URL = 'https://raw.githubusercontent.com/claude89757/TennisCourtMonitorJS/main/tennis-monitor-ultimate-v2.user.js';
+    
+    // Check for updates on script load
+    const checkForUpdates = async () => {
+        try {
+            const lastCheckTime = GM_getValue('lastUpdateCheck', 0);
+            const now = Date.now();
+            
+            // Only check once per day to avoid excessive requests
+            if (now - lastCheckTime < 24 * 60 * 60 * 1000) {
+                console.log('%c[UPDATE] Update check skipped (checked recently)', 'color: gray');
+                return;
+            }
+            
+            GM_setValue('lastUpdateCheck', now);
+            
+            // Fetch the latest version from GitHub
+            GM_xmlhttpRequest({
+                method: 'GET',
+                url: GITHUB_RAW_URL,
+                headers: {
+                    'Cache-Control': 'no-cache'
+                },
+                onload: function(response) {
+                    if (response.status === 200) {
+                        // Extract version from the response
+                        const versionMatch = response.responseText.match(/@version\s+(\d+\.\d+)/);
+                        if (versionMatch) {
+                            const remoteVersion = versionMatch[1];
+                            console.log(`%c[UPDATE] Current version: ${CURRENT_VERSION}, Remote version: ${remoteVersion}`, 'color: cyan');
+                            
+                            // Compare versions
+                            if (compareVersions(remoteVersion, CURRENT_VERSION) > 0) {
+                                console.log('%c[UPDATE] New version available!', 'background: green; color: white; font-weight: bold');
+                                
+                                // Show notification
+                                if (typeof GM_notification !== 'undefined') {
+                                    GM_notification({
+                                        title: '🎾 Tennis Monitor 更新可用',
+                                        text: `发现新版本 v${remoteVersion}！点击更新。`,
+                                        image: 'data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI2NCIgaGVpZ2h0PSI2NCIgdmlld0JveD0iMCAwIDI0IDI0Ij48dGV4dCB5PSIyMCIgZm9udC1zaXplPSIyMCI+8J+OvTwvdGV4dD48L3N2Zz4=',
+                                        onclick: function() {
+                                            window.open(GITHUB_RAW_URL, '_blank');
+                                        }
+                                    });
+                                }
+                                
+                                // Also show in-page notification
+                                showUpdateNotification(remoteVersion);
+                            } else {
+                                console.log('%c[UPDATE] Script is up to date', 'color: green');
+                            }
+                        }
+                    }
+                },
+                onerror: function(error) {
+                    console.log('%c[UPDATE] Failed to check for updates', 'color: orange');
+                    console.error(error);
+                }
+            });
+        } catch (error) {
+            console.log('%c[UPDATE] Error checking for updates', 'color: red');
+            console.error(error);
+        }
+    };
+    
+    // Compare version strings (e.g., "9.2" vs "9.1")
+    const compareVersions = (v1, v2) => {
+        const parts1 = v1.split('.').map(Number);
+        const parts2 = v2.split('.').map(Number);
+        
+        for (let i = 0; i < Math.max(parts1.length, parts2.length); i++) {
+            const part1 = parts1[i] || 0;
+            const part2 = parts2[i] || 0;
+            
+            if (part1 > part2) return 1;
+            if (part1 < part2) return -1;
+        }
+        
+        return 0;
+    };
+    
+    // Show in-page update notification
+    const showUpdateNotification = (newVersion) => {
+        const notification = document.createElement('div');
+        notification.id = 'tennis-update-notification';
+        notification.style.cssText = `
+            position: fixed;
+            top: 10px;
+            right: 10px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 15px 20px;
+            border-radius: 10px;
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.3);
+            z-index: 9999999;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            animation: slideInRight 0.5s ease;
+            max-width: 350px;
+        `;
+        
+        notification.innerHTML = `
+            <div style="display: flex; align-items: center; justify-content: space-between;">
+                <div>
+                    <div style="font-size: 16px; font-weight: bold; margin-bottom: 5px;">
+                        🎾 Tennis Monitor 更新可用
+                    </div>
+                    <div style="font-size: 14px; opacity: 0.95;">
+                        新版本 v${newVersion} 已发布
+                    </div>
+                    <div style="font-size: 12px; opacity: 0.8; margin-top: 5px;">
+                        当前版本: v${CURRENT_VERSION}
+                    </div>
+                </div>
+                <div style="display: flex; gap: 10px; margin-left: 15px;">
+                    <button id="tennis-update-btn" style="
+                        background: white;
+                        color: #667eea;
+                        border: none;
+                        padding: 8px 15px;
+                        border-radius: 5px;
+                        font-weight: bold;
+                        cursor: pointer;
+                        font-size: 14px;
+                        transition: all 0.3s;
+                    ">更新</button>
+                    <button id="tennis-update-close" style="
+                        background: transparent;
+                        color: white;
+                        border: 1px solid rgba(255, 255, 255, 0.3);
+                        padding: 8px 15px;
+                        border-radius: 5px;
+                        cursor: pointer;
+                        font-size: 14px;
+                        transition: all 0.3s;
+                    ">关闭</button>
+                </div>
+            </div>
+        `;
+        
+        // Add animation CSS
+        if (!document.getElementById('tennis-update-animation')) {
+            const style = document.createElement('style');
+            style.id = 'tennis-update-animation';
+            style.textContent = `
+                @keyframes slideInRight {
+                    from {
+                        transform: translateX(100%);
+                        opacity: 0;
+                    }
+                    to {
+                        transform: translateX(0);
+                        opacity: 1;
+                    }
+                }
+                
+                #tennis-update-btn:hover {
+                    transform: scale(1.05);
+                    box-shadow: 0 5px 15px rgba(0, 0, 0, 0.2);
+                }
+                
+                #tennis-update-close:hover {
+                    background: rgba(255, 255, 255, 0.1);
+                }
+            `;
+            document.head.appendChild(style);
+        }
+        
+        // Wait for DOM to be ready
+        const attachNotification = () => {
+            if (document.body) {
+                // Remove any existing notification
+                const existing = document.getElementById('tennis-update-notification');
+                if (existing) {
+                    existing.remove();
+                }
+                
+                document.body.appendChild(notification);
+                
+                // Add event listeners
+                document.getElementById('tennis-update-btn').onclick = () => {
+                    window.open(GITHUB_RAW_URL, '_blank');
+                    notification.remove();
+                };
+                
+                document.getElementById('tennis-update-close').onclick = () => {
+                    notification.remove();
+                };
+                
+                // Auto-hide after 30 seconds
+                setTimeout(() => {
+                    if (document.getElementById('tennis-update-notification')) {
+                        notification.style.animation = 'slideInRight 0.5s ease reverse';
+                        setTimeout(() => notification.remove(), 500);
+                    }
+                }, 30000);
+            } else {
+                setTimeout(attachNotification, 100);
+            }
+        };
+        
+        attachNotification();
+    };
+    
+    // Check for updates after page loads
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', checkForUpdates);
+    } else {
+        setTimeout(checkForUpdates, 1000);
+    }
     
     // ==================== PHASE 1: AGGRESSIVE ANTI-DEBUGGER ====================
     
@@ -830,9 +1048,15 @@
             let password = GM_getValue('airflow_password', null);
             
             if (!username || !password) {
-                // Create modal for credentials input
+                // First, remove any existing auth modal to avoid duplicates
+                const existingModal = document.getElementById('tennis-auth-modal');
+                if (existingModal) {
+                    existingModal.remove();
+                }
+                
+                // Create modal for credentials input with unique ID
                 const modal = document.createElement('div');
-                modal.id = 'auth-modal';
+                modal.id = 'tennis-auth-modal';
                 modal.style.cssText = `
                     position: fixed;
                     top: 0;
@@ -856,29 +1080,61 @@
                     width: 90%;
                 `;
                 
+                // Generate unique IDs to avoid conflicts
+                const uniqueId = Date.now();
+                const usernameId = `tennis-airflow-username-${uniqueId}`;
+                const passwordId = `tennis-airflow-password-${uniqueId}`;
+                const submitId = `tennis-auth-submit-${uniqueId}`;
+                const cancelId = `tennis-auth-cancel-${uniqueId}`;
+                
+                const togglePasswordId = `tennis-toggle-password-${uniqueId}`;
+                
                 modalContent.innerHTML = `
                     <h2 style="margin-top: 0; color: #333;">🔐 Airflow API 认证</h2>
                     <p style="color: #666;">首次使用需要输入 Airflow API 账号密码</p>
                     <div style="margin-bottom: 15px;">
                         <label style="display: block; margin-bottom: 5px; color: #555;">用户名:</label>
-                        <input type="text" id="airflow-username" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px; box-sizing: border-box;">
+                        <input type="text" id="${usernameId}" class="tennis-airflow-username" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px; box-sizing: border-box;">
                     </div>
                     <div style="margin-bottom: 20px;">
                         <label style="display: block; margin-bottom: 5px; color: #555;">密码:</label>
-                        <input type="password" id="airflow-password" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px; box-sizing: border-box;">
+                        <div style="position: relative;">
+                            <input type="password" id="${passwordId}" class="tennis-airflow-password" style="width: 100%; padding: 8px 40px 8px 8px; border: 1px solid #ddd; border-radius: 4px; box-sizing: border-box;">
+                            <button type="button" id="${togglePasswordId}" style="position: absolute; right: 8px; top: 50%; transform: translateY(-50%); background: none; border: none; cursor: pointer; padding: 5px; color: #666; font-size: 18px;" title="显示/隐藏密码">
+                                <span style="display: inline-block; width: 20px; height: 20px;">👁️</span>
+                            </button>
+                        </div>
                     </div>
                     <div style="display: flex; gap: 10px;">
-                        <button id="auth-submit" style="flex: 1; padding: 10px; background: #4CAF50; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 16px;">保存</button>
-                        <button id="auth-cancel" style="flex: 1; padding: 10px; background: #f44336; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 16px;">取消</button>
+                        <button id="${submitId}" style="flex: 1; padding: 10px; background: #4CAF50; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 16px;">保存</button>
+                        <button id="${cancelId}" style="flex: 1; padding: 10px; background: #f44336; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 16px;">取消</button>
                     </div>
                 `;
                 
                 modal.appendChild(modalContent);
                 document.body.appendChild(modal);
                 
-                document.getElementById('auth-submit').onclick = () => {
-                    const inputUsername = document.getElementById('airflow-username').value;
-                    const inputPassword = document.getElementById('airflow-password').value;
+                // Add password toggle functionality
+                let passwordVisible = false;
+                document.getElementById(togglePasswordId).onclick = () => {
+                    const passwordInput = document.getElementById(passwordId);
+                    const toggleBtn = document.getElementById(togglePasswordId);
+                    
+                    if (passwordVisible) {
+                        passwordInput.type = 'password';
+                        toggleBtn.innerHTML = '<span style="display: inline-block; width: 20px; height: 20px;">👁️</span>';
+                        passwordVisible = false;
+                    } else {
+                        passwordInput.type = 'text';
+                        toggleBtn.innerHTML = '<span style="display: inline-block; width: 20px; height: 20px;">👁️‍🗨️</span>';
+                        passwordVisible = true;
+                    }
+                };
+                
+                // Use the unique IDs for event handlers
+                document.getElementById(submitId).onclick = () => {
+                    const inputUsername = document.getElementById(usernameId).value;
+                    const inputPassword = document.getElementById(passwordId).value;
                     
                     if (inputUsername && inputPassword) {
                         GM_setValue('airflow_username', inputUsername);
@@ -891,15 +1147,18 @@
                     }
                 };
                 
-                document.getElementById('auth-cancel').onclick = () => {
+                document.getElementById(cancelId).onclick = () => {
                     modal.remove();
                     console.log('%c❌ [AIRFLOW] Authentication cancelled', 'background: red; color: white');
                     resolve(null);
                 };
                 
-                // Auto-focus username field
+                // Auto-focus username field with safer approach
                 setTimeout(() => {
-                    document.getElementById('airflow-username').focus();
+                    const usernameField = document.getElementById(usernameId);
+                    if (usernameField) {
+                        usernameField.focus();
+                    }
                 }, 100);
                 
             } else {
