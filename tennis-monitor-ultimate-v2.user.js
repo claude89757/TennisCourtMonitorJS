@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Tennis Court Monitor Ultimate V2
 // @namespace    http://tampermonkey.net/
-// @version      9.2
-// @description  Ultimate anti-debugger bypass with aggressive injection, Airflow caching and auto slider verification
+// @version      9.3
+// @description  Ultimate anti-debugger bypass with aggressive injection, Airflow caching - continues data collection regardless of verification
 // @author       Claude
 // @match        https://wxsports.ydmap.cn/booking/schedule/*
 // @match        https://wxsports.ydmap.cn/*
@@ -27,7 +27,7 @@
     
     // ==================== VERSION CHECK AND AUTO-UPDATE ====================
     
-    const CURRENT_VERSION = '9.2';
+    const CURRENT_VERSION = '9.3';
     const GITHUB_RAW_URL = 'https://raw.githubusercontent.com/claude89757/TennisCourtMonitorJS/main/tennis-monitor-ultimate-v2.user.js';
     
     // Check for updates on script load
@@ -728,15 +728,30 @@
                 this._url = url;
                 this._method = method;
                 
-                // Only log target API calls
+                // Enhanced logging for target API calls
                 if (url.includes('getVenueOrderList') || url.includes('getSportVenueConfig')) {
-                    console.log('%c[API] ' + method + ' ' + url, 'color: gray; font-size: 11px');
-                    
-                    // Track getVenueOrderList calls
                     if (url.includes('getVenueOrderList')) {
                         window.__lastApiCallTime = Date.now();
                         window.__getVenueOrderListCallCount++;
-                        console.log('%c📡 [API] getVenueOrderList call #' + window.__getVenueOrderListCallCount, 'color: blue');
+                        
+                        // Parse and log signature
+                        const urlObj = new URL(url, window.location.origin);
+                        const signature = this.getRequestHeader ? this.getRequestHeader('signature') : null;
+                        const nonce = this.getRequestHeader ? this.getRequestHeader('nonce') : null;
+                        
+                        console.log('%c📡 [API-CALL] getVenueOrderList #' + window.__getVenueOrderListCallCount, 'background: blue; color: white; font-weight: bold');
+                        console.log('  🕒 Time:', new Date().toLocaleTimeString());
+                        console.log('  🔗 Method:', method);
+                        
+                        // Extract t parameter for timing analysis
+                        const tParam = urlObj.searchParams.get('t');
+                        if (tParam) {
+                            const requestTime = parseInt(tParam);
+                            const currentTime = Date.now();
+                            console.log('  ⏰ Request t:', tParam, '(diff:', (currentTime - requestTime) + 'ms)');
+                        }
+                    } else {
+                        console.log('%c[API] ' + method + ' ' + url, 'color: gray; font-size: 11px');
                     }
                 }
                 
@@ -746,20 +761,115 @@
             XMLHttpRequest.prototype.send = function(body) {
                 const self = this;
                 
-                // Only process target APIs - let JSON.parse handle the decrypted data
+                // Enhanced monitoring for getVenueOrderList
+                if (self._url && self._url.includes('getVenueOrderList')) {
+                    // Parse URL parameters
+                    const urlObj = new URL(self._url, window.location.origin);
+                    const params = Object.fromEntries(urlObj.searchParams);
+                    
+                    console.log('%c🔍 [MONITOR] getVenueOrderList Request Details', 'background: #4CAF50; color: white; font-weight: bold');
+                    console.log('  📍 Full URL:', self._url);
+                    console.log('  📊 Parameters:', params);
+                    console.log('  🔑 Key params:', {
+                        salesItemId: params.salesItemId,
+                        curDate: params.curDate,
+                        salesId: params.salesId,
+                        t: params.t
+                    });
+                    
+                    // Store request info
+                    window.__lastVenueRequest = {
+                        url: self._url,
+                        params: params,
+                        timestamp: Date.now(),
+                        headers: self._requestHeaders || {}
+                    };
+                }
+                
+                // Process target APIs
                 if (self._url && (self._url.includes('getVenueOrderList') || self._url.includes('getSportVenueConfig'))) {
                     this.addEventListener('readystatechange', function() {
-                        if (self.readyState === 4 && self.status === 200) {
-                            // Log that we received encrypted response
+                        if (self.readyState === 4) {
+                            // Enhanced response logging
                             try {
-                                const response = JSON.parse(self.responseText);
-                                if (response.data && typeof response.data === 'string') {
-                                    console.log('%c[API] 收到加密响应，等待解密...', 'color: orange; font-size: 11px');
+                                const responseText = self.responseText;
+                                const responseHeaders = self.getAllResponseHeaders();
+                                
+                                // Check for JS verification code (captcha)
+                                if (responseText.includes('window.location') || 
+                                    responseText.includes('document.cookie') ||
+                                    responseText.includes('eval(') ||
+                                    responseText.includes('setTimeout(') ||
+                                    responseText.includes('__jsl_clearance')) {
+                                    
+                                    console.log('%c⚠️ [CAPTCHA] JavaScript验证码检测到!', 'background: red; color: white; font-size: 14px; font-weight: bold');
+                                    console.log('  🔒 Response type: JavaScript Challenge');
+                                    console.log('  📝 Response preview:', responseText.substring(0, 500));
+                                    console.log('  🌐 Request URL:', self._url);
+                                    
+                                    // Store captcha response
+                                    window.__lastCaptchaResponse = {
+                                        url: self._url,
+                                        response: responseText,
+                                        headers: responseHeaders,
+                                        timestamp: Date.now()
+                                    };
+                                    
+                                    // Increment captcha counter
+                                    window.__captchaCount = (window.__captchaCount || 0) + 1;
+                                    console.log('  📊 Captcha count this session:', window.__captchaCount);
+                                    
+                                    return;
                                 }
-                            } catch(e) {}
+                                
+                                // Normal JSON response
+                                if (self.status === 200) {
+                                    const response = JSON.parse(responseText);
+                                    
+                                    // Log response type
+                                    if (response.data && typeof response.data === 'string') {
+                                        console.log('%c[API] 收到加密响应，等待解密...', 'color: orange; font-size: 11px');
+                                        console.log('  📦 Response type: Encrypted');
+                                        console.log('  📏 Data length:', response.data.length);
+                                        
+                                        if (self._url.includes('getVenueOrderList')) {
+                                            console.log('[DEBUG] getVenueOrderList 加密数据长度:', response.data.length);
+                                            console.log('[DEBUG] 响应码:', response.code, '消息:', response.msg);
+                                            // Store for manual decryption attempts
+                                            window.__lastEncryptedVenueData = {
+                                                url: self._url,
+                                                data: response.data,
+                                                timestamp: Date.now(),
+                                                requestParams: window.__lastVenueRequest
+                                            };
+                                        }
+                                    } else if (response.code === 429) {
+                                        console.warn('%c[RATE-LIMIT] 请求频率限制', 'background: orange; color: white');
+                                        console.log('  ⏱️ Message:', response.msg);
+                                    } else if (response.code === 401) {
+                                        console.warn('%c[AUTH-FAIL] 认证失败', 'background: red; color: white');
+                                        console.log('  🔐 Message:', response.msg);
+                                    } else if (response.code === 0) {
+                                        console.log('%c✅ [SUCCESS] 正常响应', 'color: green');
+                                        console.log('  📊 Data type:', typeof response.data);
+                                    }
+                                } else {
+                                    console.warn('%c[HTTP-ERROR] Status: ' + self.status, 'background: red; color: white');
+                                    console.log('  Response:', responseText.substring(0, 500));
+                                }
+                            } catch(e) {
+                                // Not JSON response
+                                if (self.responseText && self.responseText.length < 5000) {
+                                    console.log('%c[NON-JSON] Unexpected response format', 'background: purple; color: white');
+                                    console.log('Response preview:', self.responseText.substring(0, 300));
+                                }
+                            }
                         }
                     });
                 }
+                
+                // Store request headers if available
+                self._requestHeaders = {};
                 
                 return originalSend.apply(this, arguments);
             };
@@ -778,22 +888,68 @@
                 });
             };
             
-            // Add commands
+            // Add enhanced commands
             window.check = function() {
-                console.log('%c===== 数据汇总 =====', 'background: black; color: yellow; font-weight: bold');
-                console.log('网球场名称 (salesName):', window.__salesName || '未捕获');
-                console.log('预订信息 (getVenueOrderList):', window.__orderList.length + ' 次捕获');
+                console.log('%c===== 监控数据汇总 =====', 'background: black; color: yellow; font-weight: bold');
+                console.log('🎾 网球场名称 (salesName):', window.__salesName || '未捕获');
+                console.log('📊 预订信息 (getVenueOrderList):', window.__orderList.length + ' 次捕获');
                 if (window.__orderList.length > 0) {
-                    console.log('最新预订数据:', window.__orderList[window.__orderList.length - 1]);
+                    console.log('  最新预订数据:', window.__orderList[window.__orderList.length - 1]);
                 }
-                console.log('场地配置 (getSportVenueConfig):', window.__venueConfig.length + ' 次捕获');
+                console.log('⚙️ 场地配置 (getSportVenueConfig):', window.__venueConfig.length + ' 次捕获');
                 if (window.__venueConfig.length > 0) {
-                    console.log('最新配置数据:', window.__venueConfig[window.__venueConfig.length - 1]);
+                    console.log('  最新配置数据:', window.__venueConfig[window.__venueConfig.length - 1]);
                 }
-                console.log('场地名称映射:', window.__venueNameMap);
+                console.log('🏷️ 场地名称映射:', window.__venueNameMap);
+                console.log('\n===== API调用统计 =====');
+                console.log('📡 API调用总数:', window.__getVenueOrderListCallCount || 0);
+                console.log('⚠️ 验证码拦截次数:', window.__captchaCount || 0);
+                if (window.__lastCaptchaResponse) {
+                    console.log('  最后验证码时间:', new Date(window.__lastCaptchaResponse.timestamp).toLocaleTimeString());
+                }
+                if (window.__lastVenueRequest) {
+                    console.log('\n===== 最后请求详情 =====');
+                    console.log('🔗 URL:', window.__lastVenueRequest.url);
+                    console.log('📝 参数:', window.__lastVenueRequest.params);
+                }
             };
             
-            console.log('%c[MONITOR] 监控已启动! 输入 check() 查看数据', 'background: green; color: white; font-weight: bold');
+            // Add debug mode
+            window.enableDebug = function() {
+                window.__debugMode = true;
+                console.log('%c🐛 Debug mode enabled!', 'background: purple; color: white; font-weight: bold');
+                console.log('All XHR requests will be logged in detail.');
+                
+                // Override XHR more verbosely
+                const originalXHRSend = XMLHttpRequest.prototype.send;
+                XMLHttpRequest.prototype.send = function(body) {
+                    if (window.__debugMode) {
+                        console.log('%c[DEBUG-XHR] Request:', 'color: purple');
+                        console.log('  URL:', this._url);
+                        console.log('  Method:', this._method);
+                        console.log('  Body:', body);
+                        
+                        this.addEventListener('load', function() {
+                            console.log('%c[DEBUG-XHR] Response:', 'color: purple');
+                            console.log('  Status:', this.status);
+                            console.log('  Headers:', this.getAllResponseHeaders());
+                            if (this.responseText && this.responseText.length < 1000) {
+                                console.log('  Body:', this.responseText);
+                            } else if (this.responseText) {
+                                console.log('  Body (truncated):', this.responseText.substring(0, 500) + '...');
+                            }
+                        });
+                    }
+                    return originalXHRSend.apply(this, arguments);
+                };
+            };
+            
+            console.log('%c[MONITOR] 监控已启动!', 'background: green; color: white; font-weight: bold');
+            console.log('📋 可用命令:');
+            console.log('  • check() - 查看监控数据汇总');
+            console.log('  • enableDebug() - 开启调试模式');
+            console.log('  • window.__lastCaptchaResponse - 查看最后的验证码响应');
+            console.log('  • window.__lastVenueRequest - 查看最后的请求详情');
         })();
     `;
     
@@ -1628,605 +1784,22 @@
         }
     `);
     
-    // ==================== PHASE 6: AUTO-SLIDER VERIFICATION ====================
+    // ==================== PHASE 6: SKIP VERIFICATION - CONTINUE DATA COLLECTION ====================
     
-    // Track retry attempts
-    let sliderRetryCount = 0;
-    const MAX_RETRY_ATTEMPTS = 3;
+    console.log('%c🚀 [NO-VERIFICATION] Script will continue data collection regardless of any verification', 'background: green; color: white; font-weight: bold');
     
-    // Auto-complete slider verification
-    const autoCompleteSlider = () => {
-        // First check if we already have data - if yes, skip slider check
-        if (unsafeWindow.__orderList && unsafeWindow.__orderList.length > 0) {
-            // We already have booking data, no need to check for slider
-            return false;
-        }
-        
-        // Check if we're on the actual booking page (not WAF page)
-        const isBookingPage = window.location.href.includes('/booking/schedule') || 
-                             document.querySelector('.schedule-container, .booking-container, .venue-list');
-        if (isBookingPage && !document.querySelector('#WAF_NC_WRAPPER, .waf-nc-wrapper')) {
-            // We're on booking page and no WAF wrapper, skip slider check
-            return false;
-        }
-        
-        console.log('%c🔍 [AUTO-SLIDER] Checking for WAF slider verification...', 'background: purple; color: white; font-weight: bold');
-        
-        // First check for retry button if verification failed
-        const retryButton = document.querySelector('button[onclick*="reload"], button[onclick*="refresh"], .refresh-button, #refresh-button, button:has(.refresh-icon), button:has(svg)');
-        const errorMessage = document.querySelector('.error-message, .fail-message, [id*="error"], [class*="error"], [id*="fail"], [class*="fail"]');
-        
-        // Also check for the specific error text shown in the image
-        const allTexts = document.querySelectorAll('p, div, span');
-        let hasErrorText = false;
-        for (const elem of allTexts) {
-            const text = elem.textContent || '';
-            if (text.includes('验证失败') || text.includes('请刷新重试') || text.includes('请重新验证')) {
-                hasErrorText = true;
-                break;
-            }
-        }
-        
-        // Check if there's an error message and retry button
-        if (hasErrorText || (errorMessage && errorMessage.textContent && (errorMessage.textContent.includes('验证失败') || errorMessage.textContent.includes('请刷新重试'))) || 
-            (retryButton && document.body.textContent.includes('验证失败'))) {
-            
-            sliderRetryCount++;
-            console.log(`%c🔄 [AUTO-SLIDER] Verification failed detected (Attempt ${sliderRetryCount}/${MAX_RETRY_ATTEMPTS})`, 'background: red; color: yellow; font-weight: bold');
-            
-            // If exceeded max retries, refresh the page
-            if (sliderRetryCount >= MAX_RETRY_ATTEMPTS) {
-                console.log('%c❌ [AUTO-SLIDER] Max retry attempts reached, will refresh page...', 'background: red; color: white; font-weight: bold');
-                
-                // Show countdown notification
-                const notification = document.createElement('div');
-                notification.style.cssText = `
-                    position: fixed;
-                    top: 50%;
-                    left: 50%;
-                    transform: translate(-50%, -50%);
-                    background: linear-gradient(135deg, #ff6b6b, #ff8e53);
-                    color: white;
-                    padding: 30px 40px;
-                    border-radius: 12px;
-                    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
-                    z-index: 9999999;
-                    font-weight: bold;
-                    font-size: 18px;
-                    text-align: center;
-                    min-width: 300px;
-                `;
-                
-                let countdown = 3;
-                notification.innerHTML = `
-                    <div style="font-size: 24px; margin-bottom: 10px;">❌ 多次验证失败</div>
-                    <div>已尝试 ${sliderRetryCount} 次</div>
-                    <div>将在 <span id="countdown" style="font-size: 28px; color: #FFE66D;">${countdown}</span> 秒后刷新页面</div>
-                    <div style="font-size: 14px; margin-top: 10px; opacity: 0.9;">重新加载页面...</div>
-                `;
-                document.body.appendChild(notification);
-                
-                // Countdown and refresh
-                const countdownInterval = setInterval(() => {
-                    countdown--;
-                    const countdownElement = document.getElementById('countdown');
-                    if (countdownElement) {
-                        countdownElement.textContent = countdown;
-                    }
-                    
-                    if (countdown <= 0) {
-                        clearInterval(countdownInterval);
-                        notification.innerHTML = `
-                            <div style="font-size: 24px;">🔄 正在刷新页面...</div>
-                        `;
-                        
-                        // Reset retry count before refresh
-                        sliderRetryCount = 0;
-                        
-                        // Refresh the page after a short delay
-                        setTimeout(() => {
-                            console.log('%c🔄 [AUTO-SLIDER] Refreshing page now!', 'background: green; color: white; font-size: 14px; font-weight: bold');
-                            window.location.reload();
-                        }, 500);
-                    }
-                }, 1000);
-                
-                return true;
-            }
-            
-            // Otherwise, try clicking retry button
-            console.log('%c🔄 [AUTO-SLIDER] Attempting to click retry button...', 'background: orange; color: white');
-            
-            // Try to find and click the retry/refresh button
-            const buttons = document.querySelectorAll('button, a, div[role="button"], span[role="button"]');
-            for (const btn of buttons) {
-                const btnText = btn.textContent || '';
-                const btnHTML = btn.innerHTML || '';
-                
-                // Check if this is likely a retry/refresh button
-                if (btnText.includes('刷新') || btnText.includes('重试') || btnText.includes('重新') || 
-                    btnHTML.includes('refresh') || btnHTML.includes('reload') || 
-                    btn.className.includes('refresh') || btn.className.includes('retry')) {
-                    
-                    console.log('%c🎯 [AUTO-SLIDER] Found retry button, clicking...', 'background: green; color: white');
-                    btn.click();
-                    
-                    // Show notification
-                    const notification = document.createElement('div');
-                    notification.style.cssText = `
-                        position: fixed;
-                        top: 20px;
-                        right: 20px;
-                        background: linear-gradient(135deg, #ff9800, #f57c00);
-                        color: white;
-                        padding: 15px 20px;
-                        border-radius: 8px;
-                        box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
-                        z-index: 9999999;
-                        font-weight: bold;
-                    `;
-                    notification.innerHTML = `🔄 正在重试滑块验证... (第${sliderRetryCount}次)`;
-                    document.body.appendChild(notification);
-                    setTimeout(() => notification.remove(), 3000);
-                    
-                    // Wait a bit and try again
-                    setTimeout(() => autoCompleteSlider(), 2000);
-                    return true;
-                }
-            }
-            
-            // If no specific retry button found, try clicking the circular refresh icon or any clickable element with SVG
-            const svgElements = document.querySelectorAll('svg, .icon-refresh, .icon-retry, [class*="refresh"], [class*="retry"]');
-            for (const svg of svgElements) {
-                // Check if it's inside a clickable parent
-                const clickableParent = svg.closest('button, a, div[onclick], span[onclick], div[role="button"], span[role="button"]');
-                if (clickableParent) {
-                    console.log('%c🎯 [AUTO-SLIDER] Found refresh icon, clicking parent...', 'background: green; color: white');
-                    clickableParent.click();
-                    
-                    // Show notification
-                    const notification = document.createElement('div');
-                    notification.style.cssText = `
-                        position: fixed;
-                        top: 20px;
-                        right: 20px;
-                        background: linear-gradient(135deg, #ff9800, #f57c00);
-                        color: white;
-                        padding: 15px 20px;
-                        border-radius: 8px;
-                        box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
-                        z-index: 9999999;
-                        font-weight: bold;
-                    `;
-                    notification.innerHTML = `🔄 点击刷新按钮，重试验证... (第${sliderRetryCount}次)`;
-                    document.body.appendChild(notification);
-                    setTimeout(() => notification.remove(), 3000);
-                    
-                    setTimeout(() => autoCompleteSlider(), 2000);
-                    return true;
-                }
-            }
-            
-            // Last resort: look for any element that might be clickable in the error state
-            const errorContainer = document.querySelector('.waf-nc-wrapper, #WAF_NC_WRAPPER');
-            if (errorContainer && hasErrorText) {
-                // Find any element that looks like it could be clicked
-                const clickables = errorContainer.querySelectorAll('*');
-                for (const elem of clickables) {
-                    const computed = window.getComputedStyle(elem);
-                    // Check if element has pointer cursor or looks clickable
-                    if (computed.cursor === 'pointer' || 
-                        elem.tagName === 'BUTTON' || 
-                        elem.tagName === 'A' ||
-                        elem.onclick || 
-                        elem.getAttribute('onclick')) {
-                        
-                        console.log('%c🎯 [AUTO-SLIDER] Found clickable element in error state, clicking...', 'background: green; color: white');
-                        elem.click();
-                        setTimeout(() => autoCompleteSlider(), 2000);
-                        return true;
-                    }
-                }
-            }
-        }
-        
-        // Check if WAF verification page is present
+    // Simply log if verification exists but don't stop the script
+    const checkForVerification = () => {
         const wafWrapper = document.querySelector('#WAF_NC_WRAPPER, .waf-nc-wrapper');
         const sliderElement = document.querySelector('#aliyunCaptcha-sliding-slider, .aliyunCaptcha-sliding-slider');
-        const slidingBody = document.querySelector('#aliyunCaptcha-sliding-body, .sliding');
         
-        if (wafWrapper && sliderElement && slidingBody) {
-            console.log('%c🎯 [AUTO-SLIDER] WAF slider verification detected!', 'background: red; color: yellow; font-weight: bold');
-            
-            // Show notification
-            const notification = document.createElement('div');
-            notification.style.cssText = `
-                position: fixed;
-                top: 20px;
-                right: 20px;
-                background: linear-gradient(135deg, #ff6b6b, #ff8e53);
-                color: white;
-                padding: 15px 20px;
-                border-radius: 8px;
-                box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
-                z-index: 9999999;
-                font-weight: bold;
-                animation: pulse 1s infinite;
-            `;
-            notification.innerHTML = '🤖 正在自动完成滑块验证...';
-            document.body.appendChild(notification);
-            
-            setTimeout(() => {
-                try {
-                    // Get slider dimensions
-                    const sliderRect = sliderElement.getBoundingClientRect();
-                    const bodyRect = slidingBody.getBoundingClientRect();
-                    
-                    // Calculate the distance to slide (full width minus slider width, with more precise calculation)
-                    // Add extra distance to ensure it reaches the end
-                    const slideDistance = bodyRect.width - sliderRect.width + 5; // Add 5px to ensure completion
-                    
-                    console.log('%c📏 [AUTO-SLIDER] Slider dimensions:', 'color: cyan');
-                    console.log('  - Slider width:', sliderRect.width);
-                    console.log('  - Container width:', bodyRect.width);
-                    console.log('  - Slide distance:', slideDistance);
-                    
-                    // Simulate mouse down on slider - use most compatible approach
-                    try {
-                        // Try the simplest approach first
-                        const startX = sliderRect.left + sliderRect.width / 2;
-                        const startY = sliderRect.top + sliderRect.height / 2;
-                        
-                        // Create and dispatch mousedown
-                        const mouseDownEvent = document.createEvent('MouseEvent');
-                        try {
-                            // Try with window first
-                            mouseDownEvent.initMouseEvent(
-                                'mousedown', true, true, unsafeWindow || window,
-                                0, 0, 0, startX, startY,
-                                false, false, false, false, 0, null
-                            );
-                        } catch (e) {
-                            // Fallback without window parameter
-                            mouseDownEvent.initMouseEvent(
-                                'mousedown', true, true, null,
-                                0, 0, 0, startX, startY,
-                                false, false, false, false, 0, null
-                            );
-                        }
-                        sliderElement.dispatchEvent(mouseDownEvent);
-                    } catch (e) {
-                        console.log('%c⚠️ [AUTO-SLIDER] MouseEvent creation failed, using alternative', 'color: orange');
-                        // Ultra-fallback: use simple Event
-                        const evt = new Event('mousedown', { bubbles: true, cancelable: true });
-                        evt.clientX = sliderRect.left + sliderRect.width / 2;
-                        evt.clientY = sliderRect.top + sliderRect.height / 2;
-                        sliderElement.dispatchEvent(evt);
-                    }
-                    
-                    // Simulate smooth dragging motion with human-like behavior
-                    let currentX = sliderRect.left + sliderRect.width / 2;
-                    const targetX = currentX + slideDistance;
-                    const steps = 50; // More steps for smoother motion
-                    const stepDistance = slideDistance / steps;
-                    
-                    // Variable delay for more human-like motion (slower at start and end)
-                    const getStepDelay = (stepIndex) => {
-                        if (stepIndex < 5 || stepIndex > steps - 5) {
-                            return 50 + Math.random() * 20; // Slower at start and end
-                        }
-                        return 25 + Math.random() * 15; // Faster in the middle
-                    };
-                    
-                    let stepCount = 0;
-                    
-                    // Use recursive setTimeout for variable delays
-                    const performDrag = () => {
-                        stepCount++;
-                        
-                        // Add slight randomness to movement for more human-like behavior
-                        const randomOffset = (Math.random() - 0.5) * 2; // Small random offset
-                        currentX += stepDistance + randomOffset;
-                        
-                        // Ensure we don't overshoot
-                        if (currentX > targetX) {
-                            currentX = targetX;
-                        }
-                        
-                        // Simulate mouse move - use most compatible approach
-                        try {
-                            const mouseMoveEvent = document.createEvent('MouseEvent');
-                            try {
-                                mouseMoveEvent.initMouseEvent(
-                                    'mousemove', true, true, unsafeWindow || window,
-                                    0, 0, 0, currentX, sliderRect.top + sliderRect.height / 2,
-                                    false, false, false, false, 0, null
-                                );
-                            } catch (e) {
-                                mouseMoveEvent.initMouseEvent(
-                                    'mousemove', true, true, null,
-                                    0, 0, 0, currentX, sliderRect.top + sliderRect.height / 2,
-                                    false, false, false, false, 0, null
-                                );
-                            }
-                            document.dispatchEvent(mouseMoveEvent);
-                            
-                            // Also dispatch on slider element directly
-                            sliderElement.dispatchEvent(mouseMoveEvent);
-                        } catch (e) {
-                            // Fallback to simple event
-                            const evt = new Event('mousemove', { bubbles: true, cancelable: true });
-                            evt.clientX = currentX;
-                            evt.clientY = sliderRect.top + sliderRect.height / 2;
-                            document.dispatchEvent(evt);
-                            sliderElement.dispatchEvent(evt);
-                        }
-                        
-                        // Update visual position if possible
-                        if (sliderElement.style) {
-                            const moveDistance = currentX - sliderRect.left - sliderRect.width / 2;
-                            sliderElement.style.left = moveDistance + 'px';
-                            sliderElement.style.transform = `translateX(${moveDistance}px)`;
-                        }
-                        
-                        // Also update the progress bar if it exists
-                        const progressBar = document.querySelector('#aliyunCaptcha-sliding-left, .aliyunCaptcha-sliding-slided');
-                        if (progressBar && progressBar.style) {
-                            const progressWidth = currentX - sliderRect.left;
-                            progressBar.style.width = progressWidth + 'px';
-                        }
-                        
-                        if (stepCount >= steps || currentX >= targetX) {
-                            
-                            // Simulate mouse up at the end position
-                            setTimeout(() => {
-                                try {
-                                    const mouseUpEvent = document.createEvent('MouseEvent');
-                                    try {
-                                        mouseUpEvent.initMouseEvent(
-                                            'mouseup', true, true, unsafeWindow || window,
-                                            0, 0, 0, targetX, sliderRect.top + sliderRect.height / 2,
-                                            false, false, false, false, 0, null
-                                        );
-                                    } catch (e) {
-                                        mouseUpEvent.initMouseEvent(
-                                            'mouseup', true, true, null,
-                                            0, 0, 0, targetX, sliderRect.top + sliderRect.height / 2,
-                                            false, false, false, false, 0, null
-                                        );
-                                    }
-                                    document.dispatchEvent(mouseUpEvent);
-                                } catch (e) {
-                                    // Fallback to simple event
-                                    const evt = new Event('mouseup', { bubbles: true, cancelable: true });
-                                    evt.clientX = targetX;
-                                    evt.clientY = sliderRect.top + sliderRect.height / 2;
-                                    document.dispatchEvent(evt);
-                                }
-                                
-                                console.log('%c✅ [AUTO-SLIDER] Slider verification completed!', 'background: green; color: white; font-size: 14px; font-weight: bold');
-                                
-                                // Reset retry count on success
-                                sliderRetryCount = 0;
-                                
-                                // Update notification
-                                notification.style.background = 'linear-gradient(135deg, #4CAF50, #45a049)';
-                                notification.innerHTML = '✅ 滑块验证已完成!';
-                                
-                                // Remove notification after 3 seconds
-                                setTimeout(() => {
-                                    notification.remove();
-                                }, 3000);
-                                
-                            }, 100);
-                        } else {
-                            // Continue dragging with variable delay
-                            setTimeout(performDrag, getStepDelay(stepCount));
-                        }
-                    };
-                    
-                    // Start the drag operation after initial delay
-                    setTimeout(performDrag, 200);
-                    
-                    // Alternative method: Try touch events if mouse events don't work
-                    setTimeout(() => {
-                        // Check if slider hasn't moved
-                        const newSliderRect = sliderElement.getBoundingClientRect();
-                        if (Math.abs(newSliderRect.left - sliderRect.left) < 10) {
-                            console.log('%c⚠️ [AUTO-SLIDER] Mouse events failed, trying touch events...', 'background: orange; color: white');
-                            
-                            // Try touch events instead
-                            try {
-                                const touch = {
-                                    identifier: 0,
-                                    target: sliderElement,
-                                    clientX: sliderRect.left + sliderRect.width / 2,
-                                    clientY: sliderRect.top + sliderRect.height / 2,
-                                    screenX: sliderRect.left + sliderRect.width / 2,
-                                    screenY: sliderRect.top + sliderRect.height / 2,
-                                    pageX: sliderRect.left + sliderRect.width / 2,
-                                    pageY: sliderRect.top + sliderRect.height / 2,
-                                    radiusX: 1,
-                                    radiusY: 1,
-                                    rotationAngle: 0,
-                                    force: 1
-                                };
-                                
-                                // Touch start
-                                const touchStartEvent = new TouchEvent('touchstart', {
-                                    bubbles: true,
-                                    cancelable: true,
-                                    touches: [touch],
-                                    targetTouches: [touch],
-                                    changedTouches: [touch]
-                                });
-                                sliderElement.dispatchEvent(touchStartEvent);
-                                
-                                // Simulate drag with touch move
-                                let touchX = sliderRect.left + sliderRect.width / 2;
-                                const touchSteps = 20;
-                                const touchStepDistance = slideDistance / touchSteps;
-                                
-                                for (let i = 0; i < touchSteps; i++) {
-                                    touchX += touchStepDistance;
-                                    touch.clientX = touchX;
-                                    touch.pageX = touchX;
-                                    touch.screenX = touchX;
-                                    
-                                    const touchMoveEvent = new TouchEvent('touchmove', {
-                                        bubbles: true,
-                                        cancelable: true,
-                                        touches: [touch],
-                                        targetTouches: [touch],
-                                        changedTouches: [touch]
-                                    });
-                                    document.dispatchEvent(touchMoveEvent);
-                                }
-                                
-                                // Touch end
-                                touch.clientX = sliderRect.left + slideDistance;
-                                touch.pageX = sliderRect.left + slideDistance;
-                                touch.screenX = sliderRect.left + slideDistance;
-                                
-                                const touchEndEvent = new TouchEvent('touchend', {
-                                    bubbles: true,
-                                    cancelable: true,
-                                    touches: [],
-                                    targetTouches: [],
-                                    changedTouches: [touch]
-                                });
-                                document.dispatchEvent(touchEndEvent);
-                                
-                                console.log('%c✅ [AUTO-SLIDER] Touch events dispatched', 'background: blue; color: white');
-                            } catch (touchError) {
-                                console.log('%c⚠️ [AUTO-SLIDER] Touch events failed, trying direct manipulation...', 'background: orange; color: white');
-                                console.error(touchError);
-                            }
-                        }
-                    }, 1500);
-                    
-                    // Final fallback: Direct manipulation if all events don't work
-                    setTimeout(() => {
-                        // Check if slider still hasn't moved
-                        const finalSliderRect = sliderElement.getBoundingClientRect();
-                        if (Math.abs(finalSliderRect.left - sliderRect.left) < 10) {
-                            console.log('%c⚠️ [AUTO-SLIDER] All event simulations failed, trying direct manipulation...', 'background: orange; color: white');
-                            
-                            // Try to directly set the slider position
-                            if (sliderElement.style) {
-                                sliderElement.style.left = slideDistance + 'px';
-                                sliderElement.style.transform = `translateX(${slideDistance}px)`;
-                            }
-                            
-                            // Look for success indicator or completion callback
-                            const slidingLeft = document.querySelector('#aliyunCaptcha-sliding-left, .aliyunCaptcha-sliding-slided');
-                            if (slidingLeft && slidingLeft.style) {
-                                slidingLeft.style.width = slideDistance + 'px';
-                            }
-                            
-                            // Try to trigger any completion handlers
-                            if (window.aliyunCaptcha && typeof window.aliyunCaptcha.complete === 'function') {
-                                window.aliyunCaptcha.complete();
-                            }
-                            
-                            // Check for nc object (common in Aliyun captcha)
-                            if (window.nc && typeof window.nc.reset === 'function') {
-                                // Sometimes need to get the token
-                                if (window.nc.getToken) {
-                                    const token = window.nc.getToken();
-                                    console.log('Token obtained:', token);
-                                }
-                            }
-                        }
-                    }, 2000);
-                    
-                } catch (error) {
-                    console.log('%c❌ [AUTO-SLIDER] Error during slider verification:', 'background: red; color: white');
-                    console.error(error);
-                    
-                    notification.style.background = 'linear-gradient(135deg, #f44336, #d32f2f)';
-                    notification.innerHTML = '❌ 滑块验证失败，请手动完成';
-                    setTimeout(() => notification.remove(), 5000);
-                }
-            }, 1000); // Wait 1 second before attempting
-            
-            return true; // Slider was found and attempted
+        if (wafWrapper || sliderElement) {
+            console.log('%c⚠️ [NO-VERIFICATION] Verification detected but continuing with data collection...', 'background: orange; color: white');
         }
-        
-        return false; // No slider found
     };
     
-    // Check for slider on page load and periodically
-    setTimeout(() => {
-        if (autoCompleteSlider()) {
-            console.log('%c✅ [AUTO-SLIDER] Initial slider check completed', 'background: green; color: white');
-        } else {
-            console.log('%c📋 [AUTO-SLIDER] No slider verification detected on initial check', 'color: gray');
-        }
-    }, 2000);
-    
-    // Also check periodically in case slider appears later, but only if needed
-    let sliderCheckInterval = setInterval(() => {
-        // Stop checking if we have data
-        if (unsafeWindow.__orderList && unsafeWindow.__orderList.length > 0) {
-            console.log('%c✅ [AUTO-SLIDER] Data loaded, stopping slider checks', 'color: green');
-            clearInterval(sliderCheckInterval);
-            // Also disconnect the observer
-            if (sliderObserver) {
-                sliderObserver.disconnect();
-            }
-            return;
-        }
-        
-        // Only check if there's a WAF wrapper visible
-        if (document.querySelector('#WAF_NC_WRAPPER, .waf-nc-wrapper')) {
-            autoCompleteSlider();
-        }
-    }, 5000); // Check every 5 seconds
-    
-    // Listen for DOM changes to detect when slider appears
-    const sliderObserver = new MutationObserver((mutations) => {
-        // Skip if we already have data
-        if (unsafeWindow.__orderList && unsafeWindow.__orderList.length > 0) {
-            return;
-        }
-        
-        // Check if WAF wrapper was added
-        for (const mutation of mutations) {
-            for (const node of mutation.addedNodes) {
-                if (node.nodeType === 1) { // Element node
-                    if (node.id === 'WAF_NC_WRAPPER' || 
-                        node.className === 'waf-nc-wrapper' ||
-                        (node.querySelector && node.querySelector('.waf-nc-wrapper, #WAF_NC_WRAPPER'))) {
-                        console.log('%c🚨 [AUTO-SLIDER] WAF verification detected via DOM mutation!', 'background: red; color: yellow; font-weight: bold');
-                        setTimeout(() => autoCompleteSlider(), 500);
-                        break;
-                    }
-                }
-            }
-        }
-    });
-    
-    // Start observing DOM changes only if body exists
-    if (document.body) {
-        sliderObserver.observe(document.body, {
-            childList: true,
-            subtree: true
-        });
-    } else {
-        // Wait for body to be available
-        const bodyWaitInterval = setInterval(() => {
-            if (document.body) {
-                clearInterval(bodyWaitInterval);
-                sliderObserver.observe(document.body, {
-                    childList: true,
-                    subtree: true
-                });
-            }
-        }, 100);
-    }
-    
-    console.log('%c🛡️ [AUTO-SLIDER] WAF slider auto-completion enabled', 'background: purple; color: white; font-weight: bold');
+    // Check once on page load
+    setTimeout(checkForVerification, 2000);
     
     // ==================== PHASE 7: AUTO-CLICK DATETIME TABS ====================
     
@@ -2628,12 +2201,9 @@
     
     // Start waiting for tabs with initial delay to ensure page is ready
     setTimeout(() => {
-        // Only run auto-click if we're on the booking page and not blocked by WAF
-        if (!document.querySelector('#WAF_NC_WRAPPER, .waf-nc-wrapper')) {
-            waitForDateTimeTabs();
-        } else {
-            console.log('%c⚠️ [AUTO-CLICK] WAF detected, skipping auto-click', 'background: orange; color: white');
-        }
+        // Always run auto-click regardless of WAF/verification
+        console.log('%c🚀 [AUTO-CLICK] Starting auto-click (ignoring any verification)...', 'background: green; color: white');
+        waitForDateTimeTabs();
     }, 3000); // Initial 3 second delay
     
 })();
