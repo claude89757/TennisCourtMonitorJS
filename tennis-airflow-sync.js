@@ -28,7 +28,7 @@
     // ==================== 配置 ====================
     
     const AIRFLOW_BASE_URL = 'http://zacks.com.cn:8080/airflow/api/v1';
-    const SYNC_INTERVAL = 2 * 60 * 1000; // 2分钟
+    const SYNC_INTERVAL = 3 * 60 * 1000; // 3分钟
     
     // ==================== 日期标签查找和点击 ====================
     
